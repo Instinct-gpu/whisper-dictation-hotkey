@@ -50,6 +50,32 @@ python -m venv .venv
 
 The first transcription downloads the configured Whisper model. After that, transcription runs locally.
 
+## Easy Windows Install
+
+For normal users, use the latest release ZIP from GitHub Releases:
+
+1. Download `WhisperDictation-Windows.zip`.
+2. Extract the ZIP.
+3. Right-click `install_windows.ps1` and choose **Run with PowerShell**.
+4. Hold `Ctrl+Shift+Space` to dictate.
+
+The installer copies the app to:
+
+```text
+%LOCALAPPDATA%\WhisperDictation
+```
+
+It also creates:
+
+- A Start Menu shortcut named `Whisper Dictation`
+- A Startup shortcut so the app starts when Windows starts
+
+To remove it, run:
+
+```powershell
+.\uninstall_windows.ps1
+```
+
 ## Packaged Windows App
 
 If you build the packaged app, the executable is:
