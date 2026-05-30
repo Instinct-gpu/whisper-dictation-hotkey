@@ -1,0 +1,25 @@
+# Local environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Runtime files
+log/
+*.log
+*.lock
+
+# Build outputs
+app/
+build/
+dist/
+*.spec
+*.exe
+*.msi
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+

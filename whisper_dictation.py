@@ -1,0 +1,713 @@
+from __future__ import annotations
+
+import ctypes
+import json
+import msvcrt
+import os
+import queue
+import re
+import sys
+import tempfile
+import threading
+import time
+import tkinter as tk
+import wave
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+import numpy as np
+import pyautogui
+import pyperclip
+import pystray
+import sounddevice as sd
+from faster_whisper import WhisperModel
+from PIL import Image, ImageDraw
+from pynput import keyboard
+
+
+if getattr(sys, "frozen", False):
+    EXE_DIR = Path(sys.executable).resolve().parent
+    APP_DIR = EXE_DIR.parent.parent if EXE_DIR.parent.name.lower() == "app" else EXE_DIR
+else:
+    APP_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = APP_DIR / "config.json"
+LOCK_PATH = APP_DIR / "whisper_dictation.lock"
+LOG_PATH = APP_DIR / "whisper_dictation.log"
+TRANSCRIPT_LOG_DIR = APP_DIR / "log"
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    hotkey: str = "<ctrl>+<shift>+space"
+    cancel_key: str = "esc"
+    model_size: str = "base.en"
+    device: str = "cpu"
+    compute_type: str = "int8"
+    language: Optional[str] = "en"
+    paste_method: str = "clipboard"
+    restore_clipboard: bool = True
+    sample_rate: int = 16000
+    silence_trim: bool = True
+    visual_indicator: bool = True
+
+
+class Status:
+    IDLE = "Idle"
+    RECORDING = "Recording"
+    RECORDING_AND_PROCESSING = "Recording + Processing"
+    PROCESSING = "Processing"
+
+
+class SingleInstance:
+    def __init__(self, path: Path) -> None:
+        self.handle = path.open("a+b")
+        self.handle.seek(0)
+        try:
+            msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            self.handle.close()
+            raise RuntimeError("Whisper Dictation is already running.")
+
+    def release(self) -> None:
+        try:
+            self.handle.seek(0)
+            msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            self.handle.close()
+
+
+class RecordingIndicator:
+    def __init__(self) -> None:
+        self.commands: queue.Queue[Any] = queue.Queue()
+        self.ready = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        self.ready.wait(timeout=2)
+
+    def show(self) -> None:
+        self.commands.put("show")
+
+    def hide(self) -> None:
+        self.commands.put("hide")
+
+    def set_level(self, level: float) -> None:
+        self.commands.put(("level", max(0.0, min(1.0, level))))
+
+    def stop(self) -> None:
+        self.commands.put("stop")
+
+    def _run(self) -> None:
+        root = tk.Tk()
+        root.withdraw()
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+        root.configure(bg="#242424")
+
+        width = 442
+        height = 87
+        x = root.winfo_screenwidth() - width - 18
+        y = root.winfo_screenheight() - height - 64
+        root.geometry(f"{width}x{height}+{x}+{y}")
+
+        frame = tk.Frame(root, bg="#242424", padx=14, pady=10)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(
+            frame,
+            text="Recording",
+            fg="#ffffff",
+            bg="#242424",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w")
+
+        spacer = tk.Frame(frame, bg="#242424", height=10)
+        spacer.pack(fill="x")
+
+        row = tk.Frame(frame, bg="#242424")
+        row.pack(fill="x", pady=(0, 0))
+
+        tk.Label(row, text="+", fg="#747474", bg="#242424", font=("Segoe UI", 18)).pack(side="left")
+
+        wave_height = 36
+        wave = tk.Canvas(row, width=326, height=wave_height, bg="#242424", highlightthickness=0)
+        wave.pack(side="left", padx=(12, 8), fill="x", expand=True)
+
+        timer_label = tk.Label(row, text="0:00", fg="#cfcfcf", bg="#242424", font=("Segoe UI", 9))
+        timer_label.pack(side="left", padx=(0, 0))
+
+        state = {
+            "tick": 0,
+            "level": 0.0,
+            "levels": deque([0.0] * 112, maxlen=112),
+            "started": time.monotonic(),
+        }
+
+        def animate() -> None:
+            state["tick"] += 1
+            level = state["level"]
+            state["levels"].append(level)
+            state["level"] *= 0.82
+
+            wave.delete("all")
+            baseline = wave_height // 2
+            wave_width = int(wave.winfo_width() or 326)
+            max_amplitude = baseline - 3
+            levels = list(state["levels"])
+            spacing = max(3, wave_width // max(1, len(levels) - 1))
+
+            wave.create_line(0, baseline, wave_width, baseline, fill="#6f6f6f", dash=(1, 3))
+            start_x = max(0, wave_width - spacing * len(levels))
+            for index, sample in enumerate(levels):
+                x_pos = start_x + index * spacing
+                pulse = 0.82 + 0.18 * abs(((state["tick"] + index) % 18) - 9) / 9
+                visual_level = min(1.0, sample)
+                shaped_level = visual_level ** 1.08
+                amplitude = min(max_amplitude, shaped_level * max_amplitude * pulse)
+                if amplitude < 1.4:
+                    continue
+                wave.create_line(x_pos, baseline - amplitude, x_pos, baseline + amplitude, fill="#ffffff", width=2)
+
+            elapsed = int(time.monotonic() - state["started"])
+            timer_label.configure(text=f"{elapsed // 60}:{elapsed % 60:02d}")
+            root.after(50, animate)
+
+        def pump() -> None:
+            while True:
+                try:
+                    command = self.commands.get_nowait()
+                except queue.Empty:
+                    break
+                if command == "show":
+                    state["levels"].clear()
+                    state["levels"].extend([0.0] * 112)
+                    state["started"] = time.monotonic()
+                    show_without_activation(root)
+                elif command == "hide":
+                    root.withdraw()
+                elif command == "stop":
+                    root.destroy()
+                    return
+                elif isinstance(command, tuple) and command[0] == "level":
+                    state["level"] = command[1]
+            root.after(100, pump)
+
+        self.ready.set()
+        make_no_activate(root)
+        animate()
+        pump()
+        root.mainloop()
+
+
+class DictationApp:
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
+        self.status = Status.IDLE
+        self.audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+        self.frames: list[np.ndarray] = []
+        self.stream: Optional[sd.InputStream] = None
+        self.target_hwnd: Optional[int] = None
+        self.is_recording = False
+        self.active_jobs = 0
+        self.worker_threads: list[threading.Thread] = []
+        self.model: Optional[WhisperModel] = None
+        self.model_lock = threading.Lock()
+        self.transcription_lock = threading.Lock()
+        self.icon: Optional[pystray.Icon] = None
+        self.indicator: Optional[RecordingIndicator] = RecordingIndicator() if config.visual_indicator else None
+        self.last_level_update = 0.0
+        self.cancel_requested = False
+        self.release_poll_active = False
+        self.lock = threading.Lock()
+
+    def run(self) -> None:
+        self.icon = pystray.Icon(
+            "whisper-dictation",
+            self._make_icon("idle"),
+            "Whisper Dictation",
+            menu=pystray.Menu(
+                pystray.MenuItem(lambda item: f"Status: {self.status}", None, enabled=False),
+                pystray.MenuItem("Open Logs", self._open_logs),
+                pystray.MenuItem("Quit", self._quit),
+            ),
+        )
+
+        hotkey = keyboard.Listener(on_press=self._on_key_press, on_release=self._on_key_release)
+        hotkey.start()
+
+        print(f"Whisper Dictation is running. Hold hotkey: {self.config.hotkey}")
+        self.icon.run()
+        if self.indicator is not None:
+            self.indicator.stop()
+        hotkey.stop()
+
+    def start_recording(self) -> None:
+        with self.lock:
+            if self.is_recording:
+                return
+            self._start_recording_locked()
+
+    def stop_recording(self) -> None:
+        with self.lock:
+            if not self.is_recording:
+                return
+            self._stop_recording_locked()
+
+    def cancel_recording(self) -> None:
+        with self.lock:
+            if not self.is_recording:
+                return
+            self.cancel_requested = True
+            self._stop_recording_locked()
+
+    def _open_logs(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True)
+        os.startfile(TRANSCRIPT_LOG_DIR)
+
+    def _on_key_press(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
+        if hotkey_is_down(self.config.hotkey):
+            self.start_recording()
+            if sys.platform == "win32" and not self.release_poll_active:
+                self.release_poll_active = True
+                threading.Thread(target=self._poll_hotkey_release, daemon=True).start()
+        elif key_matches(key, self._cancel_hotkey()):
+            self.cancel_recording()
+
+    def _on_key_release(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
+        if sys.platform != "win32" and not hotkey_is_down(self.config.hotkey):
+            self.stop_recording()
+
+    def _poll_hotkey_release(self) -> None:
+        try:
+            while hotkey_is_down(self.config.hotkey):
+                time.sleep(0.035)
+            self.stop_recording()
+        finally:
+            self.release_poll_active = False
+
+    def _start_recording_locked(self) -> None:
+        self.frames = []
+        self.cancel_requested = False
+        self.audio_queue = queue.Queue()
+        self.target_hwnd = get_foreground_window()
+        self.is_recording = True
+        self._refresh_status_locked()
+        self._update_icon("recording")
+        if self.indicator is not None:
+            self.indicator.show()
+
+        self.stream = sd.InputStream(
+            samplerate=self.config.sample_rate,
+            channels=1,
+            dtype="float32",
+            callback=self._audio_callback,
+        )
+        self.stream.start()
+        print("Recording...")
+
+    def _stop_recording_locked(self) -> None:
+        if self.indicator is not None:
+            self.indicator.hide()
+
+        if self.stream is not None:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+
+        while True:
+            try:
+                self.frames.append(self.audio_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        self.is_recording = False
+        if self.cancel_requested:
+            self._refresh_status_locked()
+            self._update_icon("busy" if self.active_jobs else "idle")
+            print("Recording canceled.")
+            return
+
+        frames = self.frames
+        target_hwnd = self.target_hwnd
+        self.frames = []
+        self.target_hwnd = None
+        self.active_jobs += 1
+        self._refresh_status_locked()
+        self._update_icon("busy")
+        worker = threading.Thread(target=self._transcribe_and_paste, args=(frames, target_hwnd), daemon=True)
+        self.worker_threads.append(worker)
+        worker.start()
+
+    def _audio_callback(self, indata: np.ndarray, _frames: int, _time_info, status) -> None:
+        if status:
+            print(status, file=sys.stderr)
+        self.audio_queue.put(indata.copy())
+        if self.indicator is not None:
+            now = time.monotonic()
+            if now - self.last_level_update > 0.08:
+                rms = float(np.sqrt(np.mean(np.square(indata))))
+                self.indicator.set_level(min(1.0, (rms / 0.065) ** 0.92))
+                self.last_level_update = now
+
+    def _transcribe_and_paste(self, frames: list[np.ndarray], target_hwnd: Optional[int]) -> None:
+        try:
+            if not frames:
+                print("No audio captured.")
+                return
+
+            audio = np.concatenate(frames, axis=0).reshape(-1)
+            if self.config.silence_trim:
+                audio = trim_silence(audio)
+
+            if audio.size < self.config.sample_rate // 4:
+                print("Audio was too short to transcribe.")
+                log_event("audio too short to transcribe")
+                return
+
+            wav_path = write_temp_wav(audio, self.config.sample_rate)
+            try:
+                with self.transcription_lock:
+                    model = self._get_model()
+                    segments, _info = model.transcribe(
+                        str(wav_path),
+                        language=self.config.language,
+                        vad_filter=False,
+                        beam_size=5,
+                    )
+                    text = " ".join(segment.text.strip() for segment in segments).strip()
+            finally:
+                wav_path.unlink(missing_ok=True)
+
+            if not text:
+                print("No speech detected.")
+                log_event("no speech detected")
+                return
+
+            append_transcript_history(text)
+            paste_text(text, target_hwnd=target_hwnd, restore_clipboard=self.config.restore_clipboard)
+            print(f"Pasted: {text}")
+        except Exception as exc:
+            print(f"Dictation failed: {exc}", file=sys.stderr)
+            log_event(f"dictation failed: {exc}")
+        finally:
+            with self.lock:
+                self.active_jobs = max(0, self.active_jobs - 1)
+                self._refresh_status_locked()
+                self._update_icon("recording" if self.is_recording else "busy" if self.active_jobs else "idle")
+
+    def _get_model(self) -> WhisperModel:
+        with self.model_lock:
+            if self.model is None:
+                print(f"Loading Whisper model: {self.config.model_size}")
+                self.model = WhisperModel(
+                    self.config.model_size,
+                    device=self.config.device,
+                    compute_type=self.config.compute_type,
+                )
+            return self.model
+
+    def _cancel_hotkey(self) -> str:
+        key = self.config.cancel_key.strip().lower()
+        return key if key.startswith("<") else f"<{key}>"
+
+    def _quit(self, icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        with self.lock:
+            if self.stream is not None:
+                self.stream.stop()
+                self.stream.close()
+                self.stream = None
+            if self.indicator is not None:
+                self.indicator.stop()
+        icon.stop()
+
+    def _refresh_status_locked(self) -> None:
+        if self.is_recording and self.active_jobs:
+            self.status = Status.RECORDING_AND_PROCESSING
+        elif self.is_recording:
+            self.status = Status.RECORDING
+        elif self.active_jobs:
+            self.status = Status.PROCESSING
+        else:
+            self.status = Status.IDLE
+
+    def _update_icon(self, state: str) -> None:
+        if self.icon is not None:
+            self.icon.icon = self._make_icon(state)
+            self.icon.title = f"Whisper Dictation - {self.status}"
+
+    @staticmethod
+    def _make_icon(state: str) -> Image.Image:
+        color = {
+            "idle": (38, 132, 255),
+            "recording": (220, 53, 69),
+            "busy": (255, 193, 7),
+        }.get(state, (38, 132, 255))
+
+        image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((8, 8, 56, 56), fill=color)
+        draw.rounded_rectangle((27, 16, 37, 39), radius=5, fill=(255, 255, 255))
+        draw.arc((20, 29, 44, 53), 0, 180, fill=(255, 255, 255), width=4)
+        draw.line((32, 51, 32, 58), fill=(255, 255, 255), width=4)
+        return image
+
+
+def key_matches(key: keyboard.Key | keyboard.KeyCode | None, configured: str) -> bool:
+    name = normalize_hotkey_part(configured)
+    if key is None:
+        return False
+    if isinstance(key, keyboard.KeyCode):
+        return key.char is not None and key.char.lower() == name
+    key_name = key_to_name(key)
+    return key_name == name
+
+
+def normalize_hotkey_part(part: str) -> str:
+    name = part.strip().lower().removeprefix("<").removesuffix(">")
+    aliases = {
+        "control": "ctrl",
+        "ctrl_l": "ctrl",
+        "ctrl_r": "ctrl",
+        "shift_l": "shift",
+        "shift_r": "shift",
+        "cmd": "win",
+        "cmd_l": "win",
+        "cmd_r": "win",
+        "win_l": "win",
+        "win_r": "win",
+        "escape": "esc",
+    }
+    return aliases.get(name, name)
+
+
+def parse_hotkey(configured: str) -> list[str]:
+    return [normalize_hotkey_part(part) for part in configured.split("+") if part.strip()]
+
+
+def key_to_name(key: keyboard.Key | keyboard.KeyCode | None) -> Optional[str]:
+    if key is None:
+        return None
+    if isinstance(key, keyboard.KeyCode):
+        return key.char.lower() if key.char else None
+    raw = getattr(key, "name", str(key).replace("Key.", ""))
+    return normalize_hotkey_part(raw)
+
+
+def hotkey_is_down(configured: str) -> bool:
+    parts = parse_hotkey(configured)
+    if not parts:
+        return False
+    if sys.platform != "win32":
+        return False
+    return all(is_key_down(vk) for part in parts for vk in hotkey_virtual_keys(part))
+
+
+def hotkey_virtual_keys(part: str) -> list[int]:
+    name = normalize_hotkey_part(part)
+    if name.startswith("f") and name[1:].isdigit():
+        number = int(name[1:])
+        if 1 <= number <= 24:
+            return [0x6F + number]
+    if len(name) == 1:
+        return [ord(name.upper())]
+    special = {
+        "ctrl": [0x11],
+        "shift": [0x10],
+        "alt": [0x12],
+        "win": [0x5B, 0x5C],
+        "space": [0x20],
+        "esc": [0x1B],
+        "tab": [0x09],
+        "enter": [0x0D],
+    }
+    return special.get(name, [])
+
+
+def is_key_down(virtual_key: int) -> bool:
+    if sys.platform != "win32":
+        return False
+    return bool(ctypes.windll.user32.GetAsyncKeyState(virtual_key) & 0x8000)
+
+
+def make_no_activate(root: tk.Tk) -> None:
+    if sys.platform != "win32":
+        return
+    root.update_idletasks()
+    hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+    if not hwnd:
+        hwnd = root.winfo_id()
+    gwl_exstyle = -20
+    ws_ex_toolwindow = 0x00000080
+    ws_ex_noactivate = 0x08000000
+    style = ctypes.windll.user32.GetWindowLongW(hwnd, gwl_exstyle)
+    ctypes.windll.user32.SetWindowLongW(hwnd, gwl_exstyle, style | ws_ex_toolwindow | ws_ex_noactivate)
+    apply_rounded_corners(hwnd)
+
+
+def apply_rounded_corners(hwnd: int) -> None:
+    try:
+        dwmwa_window_corner_preference = 33
+        dwmwcp_round = 2
+        preference = ctypes.c_int(dwmwcp_round)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd,
+            dwmwa_window_corner_preference,
+            ctypes.byref(preference),
+            ctypes.sizeof(preference),
+        )
+    except Exception:
+        pass
+
+
+def show_without_activation(root: tk.Tk) -> None:
+    if sys.platform != "win32":
+        root.deiconify()
+        root.lift()
+        return
+
+    root.deiconify()
+    root.update_idletasks()
+    hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+    if not hwnd:
+        hwnd = root.winfo_id()
+    hwnd_topmost = -1
+    swp_noactivate = 0x0010
+    swp_showwindow = 0x0040
+    sw_shownoactivate = 4
+    ctypes.windll.user32.ShowWindow(hwnd, sw_shownoactivate)
+    ctypes.windll.user32.SetWindowPos(hwnd, hwnd_topmost, 0, 0, 0, 0, swp_noactivate | swp_showwindow | 0x0001 | 0x0002)
+
+
+def get_foreground_window() -> Optional[int]:
+    if sys.platform != "win32":
+        return None
+    hwnd = ctypes.windll.user32.GetForegroundWindow()
+    return int(hwnd) if hwnd else None
+
+
+def restore_foreground_window(hwnd: Optional[int]) -> None:
+    if sys.platform != "win32" or not hwnd:
+        return
+    user32 = ctypes.windll.user32
+    if not user32.IsWindow(hwnd):
+        return
+    user32.ShowWindow(hwnd, 5)
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.12)
+
+
+def send_ctrl_v() -> None:
+    if sys.platform != "win32":
+        pyautogui.hotkey("ctrl", "v", interval=0.03)
+        return
+    user32 = ctypes.windll.user32
+    vk_control = 0x11
+    vk_v = 0x56
+    keyeventf_keyup = 0x0002
+    user32.keybd_event(vk_control, 0, 0, 0)
+    user32.keybd_event(vk_v, 0, 0, 0)
+    time.sleep(0.03)
+    user32.keybd_event(vk_v, 0, keyeventf_keyup, 0)
+    user32.keybd_event(vk_control, 0, keyeventf_keyup, 0)
+
+
+def log_event(message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with LOG_PATH.open("a", encoding="utf-8") as log:
+        log.write(f"[{timestamp}] {message}\n")
+
+
+def append_transcript_history(text: str) -> None:
+    normalized = normalize_spacing(text)
+    if not normalized:
+        return
+    TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True)
+    log_path = TRANSCRIPT_LOG_DIR / f"{time.strftime('%Y-%m-%d')}.txt"
+    timestamp = time.strftime("%H:%M:%S")
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(f"[{timestamp}] {normalized}\n\n")
+
+
+def load_config() -> AppConfig:
+    if not CONFIG_PATH.exists():
+        return AppConfig()
+    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    fields = {field.name for field in AppConfig.__dataclass_fields__.values()}
+    return AppConfig(**{key: value for key, value in data.items() if key in fields})
+
+
+def trim_silence(audio: np.ndarray, threshold: float = 0.012, padding_ms: int = 200) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+
+    loud = np.abs(audio) > threshold
+    if not np.any(loud):
+        return audio
+
+    first = int(np.argmax(loud))
+    last = int(len(loud) - np.argmax(loud[::-1]))
+    padding = int(16000 * padding_ms / 1000)
+    start = max(0, first - padding)
+    end = min(audio.size, last + padding)
+    return audio[start:end]
+
+
+def write_temp_wav(audio: np.ndarray, sample_rate: int) -> Path:
+    normalized = np.clip(audio, -1.0, 1.0)
+    pcm = (normalized * 32767).astype(np.int16)
+
+    handle = tempfile.NamedTemporaryFile(prefix="whisper-dictation-", suffix=".wav", delete=False)
+    path = Path(handle.name)
+    handle.close()
+
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm.tobytes())
+    return path
+
+
+def paste_text(text: str, target_hwnd: Optional[int], restore_clipboard: bool = True) -> None:
+    previous = None
+    if restore_clipboard:
+        try:
+            previous = pyperclip.paste()
+        except pyperclip.PyperclipException:
+            previous = None
+
+    normalized = normalize_spacing(text)
+    pyperclip.copy(normalized)
+    restore_foreground_window(target_hwnd)
+    time.sleep(0.25)
+    send_ctrl_v()
+    log_event(f"pasted {len(normalized)} chars to hwnd={target_hwnd}")
+
+    if restore_clipboard and previous is not None:
+        time.sleep(3.0)
+        pyperclip.copy(previous)
+
+
+def normalize_spacing(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def main() -> None:
+    instance: Optional[SingleInstance] = None
+    try:
+        instance = SingleInstance(LOCK_PATH)
+        app = DictationApp(load_config())
+        app.run()
+    except RuntimeError as exc:
+        print(exc)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if instance is not None:
+            instance.release()
+
+
+if __name__ == "__main__":
+    main()

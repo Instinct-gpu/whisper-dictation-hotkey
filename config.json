@@ -1,0 +1,13 @@
+{
+  "hotkey": "<ctrl>+<shift>+space",
+  "cancel_key": "esc",
+  "model_size": "base.en",
+  "device": "cpu",
+  "compute_type": "int8",
+  "language": "en",
+  "paste_method": "clipboard",
+  "restore_clipboard": false,
+  "sample_rate": 16000,
+  "silence_trim": true,
+  "visual_indicator": true
+}
