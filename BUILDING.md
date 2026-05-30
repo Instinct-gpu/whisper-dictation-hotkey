@@ -52,7 +52,6 @@ app\WhisperDictation\WhisperDictation.exe
 
 ## Notes
 
-- The default configuration uses CPU mode (`device: cpu`, `compute_type: int8`) so it does not compete with GPU workloads.
+- The default configuration tries GPU mode (`device: cuda`, `compute_type: float16`) and can be switched to CPU mode from the tray menu. If GPU model loading fails, the app falls back to CPU/int8.
 - `vad_filter` is disabled in the current build because PyInstaller packaging did not include faster-whisper's optional Silero VAD assets by default.
 - The generated `app`, `build`, `.venv`, `log`, and runtime files are intentionally ignored by git.
-

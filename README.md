@@ -13,7 +13,7 @@ It uses local Whisper transcription through `faster-whisper`, so recordings are 
 - Daily transcript history logs
 - Tray icon with quick access to logs
 - Windows Startup and Start Menu shortcut support
-- CPU-first defaults so it does not fight GPU-heavy workloads
+- GPU/CPU mode switching from the tray menu
 
 ## Supported Platforms
 
@@ -99,8 +99,8 @@ Edit `config.json`:
   "hotkey": "<ctrl>+<shift>+space",
   "cancel_key": "esc",
   "model_size": "base.en",
-  "device": "cpu",
-  "compute_type": "int8",
+  "device": "cuda",
+  "compute_type": "float16",
   "language": "en",
   "paste_method": "clipboard",
   "restore_clipboard": false,
@@ -116,7 +116,7 @@ Recommended model sizes:
 - `small.en`: better accuracy, slower.
 - `medium.en`: strong accuracy, much slower on CPU.
 
-The default uses CPU mode (`device: cpu`, `compute_type: int8`) so the app stays responsive even when the GPU is busy with other work.
+The default tries GPU mode (`device: cuda`, `compute_type: float16`) for faster transcription. If GPU model loading fails, the app logs the error and falls back to CPU mode (`device: cpu`, `compute_type: int8`). You can also switch modes from the tray menu; the choice is saved to `config.json` and reused after restart.
 
 ## Troubleshooting
 
@@ -135,20 +135,19 @@ If the first transcription is slow:
 
 - The first run may download the Whisper model and initialize the transcription engine.
 
-## Linux Support
+## Linux/X11 Support
 
-Linux is not implemented yet. See the notes at the end of this README for what would be needed.
+An experimental Linux/X11 version lives in [linux_x11](linux_x11). It is intended for X11 desktop sessions on Debian, Ubuntu, Linux Mint, XFCE, Cinnamon, MATE, KDE on X11, and GNOME when logged into an Xorg session.
 
-At a high level, the transcription and audio pieces are portable, but these Windows-specific areas need Linux replacements:
+It is not tested on this Windows development machine, and it is not designed for Wayland yet. Wayland generally restricts global hotkeys, focus control, and synthetic paste events unless desktop portals or compositor-specific APIs are used.
 
-- Global hotkey capture
-- Active window restore
-- Clipboard paste
-- Tray icon behavior
-- Startup integration
-- Overlay focus/no-activation behavior
+The X11 app has the same basic shape:
 
-For Linux, likely building blocks would be `pynput` or desktop-specific hotkey APIs, `xclip`/`wl-copy` for clipboard, `xdotool`/Wayland portals for paste, and autostart `.desktop` files.
+- Hold `Ctrl+Shift+Space` to record.
+- Release to transcribe.
+- Copy and paste via the X11 clipboard/`xdotool`.
+- Save daily transcript logs.
+- Show a small recording overlay.
 
 ## License
 

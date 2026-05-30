@@ -38,16 +38,16 @@ LOG_PATH = APP_DIR / "whisper_dictation.log"
 TRANSCRIPT_LOG_DIR = APP_DIR / "log"
 
 
-@dataclass(frozen=True)
+@dataclass
 class AppConfig:
     hotkey: str = "<ctrl>+<shift>+space"
     cancel_key: str = "esc"
     model_size: str = "base.en"
-    device: str = "cpu"
-    compute_type: str = "int8"
+    device: str = "cuda"
+    compute_type: str = "float16"
     language: Optional[str] = "en"
     paste_method: str = "clipboard"
-    restore_clipboard: bool = True
+    restore_clipboard: bool = False
     sample_rate: int = 16000
     silence_trim: bool = True
     visual_indicator: bool = True
@@ -228,6 +228,11 @@ class DictationApp:
             "Whisper Dictation",
             menu=pystray.Menu(
                 pystray.MenuItem(lambda item: f"Status: {self.status}", None, enabled=False),
+                pystray.MenuItem(lambda item: f"Mode: {self._mode_label()}", None, enabled=False),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Use GPU", self._use_gpu, checked=lambda item: self.config.device == "cuda"),
+                pystray.MenuItem("Use CPU", self._use_cpu, checked=lambda item: self.config.device == "cpu"),
+                pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Open Logs", self._open_logs),
                 pystray.MenuItem("Quit", self._quit),
             ),
@@ -264,6 +269,25 @@ class DictationApp:
     def _open_logs(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True)
         os.startfile(TRANSCRIPT_LOG_DIR)
+
+    def _mode_label(self) -> str:
+        return "GPU" if self.config.device == "cuda" else "CPU"
+
+    def _use_gpu(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._set_compute_mode("cuda", "float16")
+
+    def _use_cpu(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._set_compute_mode("cpu", "int8")
+
+    def _set_compute_mode(self, device: str, compute_type: str) -> None:
+        with self.model_lock:
+            self.config.device = device
+            self.config.compute_type = compute_type
+            self.model = None
+            save_config(self.config)
+        log_event(f"compute mode set to {device}/{compute_type}")
+        if self.icon is not None:
+            self.icon.update_menu()
 
     def _on_key_press(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
         if hotkey_is_down(self.config.hotkey):
@@ -399,12 +423,27 @@ class DictationApp:
     def _get_model(self) -> WhisperModel:
         with self.model_lock:
             if self.model is None:
-                print(f"Loading Whisper model: {self.config.model_size}")
-                self.model = WhisperModel(
-                    self.config.model_size,
-                    device=self.config.device,
-                    compute_type=self.config.compute_type,
-                )
+                print(f"Loading Whisper model: {self.config.model_size} ({self.config.device}/{self.config.compute_type})")
+                try:
+                    self.model = WhisperModel(
+                        self.config.model_size,
+                        device=self.config.device,
+                        compute_type=self.config.compute_type,
+                    )
+                except Exception as exc:
+                    if self.config.device != "cuda":
+                        raise
+                    log_event(f"gpu model load failed, falling back to cpu/int8: {exc}")
+                    self.config.device = "cpu"
+                    self.config.compute_type = "int8"
+                    save_config(self.config)
+                    self.model = WhisperModel(
+                        self.config.model_size,
+                        device=self.config.device,
+                        compute_type=self.config.compute_type,
+                    )
+                    if self.icon is not None:
+                        self.icon.update_menu()
             return self.model
 
     def _cancel_hotkey(self) -> str:
@@ -635,6 +674,11 @@ def load_config() -> AppConfig:
     data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     fields = {field.name for field in AppConfig.__dataclass_fields__.values()}
     return AppConfig(**{key: value for key, value in data.items() if key in fields})
+
+
+def save_config(config: AppConfig) -> None:
+    data = {field: getattr(config, field) for field in AppConfig.__dataclass_fields__}
+    CONFIG_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def trim_silence(audio: np.ndarray, threshold: float = 0.012, padding_ms: int = 200) -> np.ndarray:
