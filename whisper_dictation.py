@@ -17,7 +17,7 @@ import wave
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pyautogui
@@ -92,11 +92,14 @@ class RecordingIndicator:
         self.thread.start()
         self.ready.wait(timeout=2)
 
-    def show(self) -> None:
-        self.commands.put("show")
+    def show(self, title: str = "Recording") -> None:
+        self.commands.put(("show", title))
 
     def hide(self) -> None:
         self.commands.put("hide")
+
+    def set_title(self, title: str) -> None:
+        self.commands.put(("title", title))
 
     def set_level(self, level: float) -> None:
         self.commands.put(("level", max(0.0, min(1.0, level))))
@@ -120,13 +123,14 @@ class RecordingIndicator:
         frame = tk.Frame(root, bg="#242424", padx=14, pady=10)
         frame.pack(fill="both", expand=True)
 
-        tk.Label(
+        title_label = tk.Label(
             frame,
             text="Recording",
             fg="#ffffff",
             bg="#242424",
             font=("Segoe UI", 10, "bold"),
-        ).pack(anchor="w")
+        )
+        title_label.pack(anchor="w")
 
         spacer = tk.Frame(frame, bg="#242424", height=10)
         spacer.pack(fill="x")
@@ -185,9 +189,11 @@ class RecordingIndicator:
                     command = self.commands.get_nowait()
                 except queue.Empty:
                     break
-                if command == "show":
+                if isinstance(command, tuple) and command[0] == "show":
+                    title_label.configure(text=command[1])
                     state["levels"].clear()
                     state["levels"].extend([0.0] * 112)
+                    state["level"] = 0.0
                     state["started"] = time.monotonic()
                     show_without_activation(root)
                 elif command == "hide":
@@ -195,6 +201,9 @@ class RecordingIndicator:
                 elif command == "stop":
                     root.destroy()
                     return
+                elif isinstance(command, tuple) and command[0] == "title":
+                    title_label.configure(text=command[1])
+                    state["started"] = time.monotonic()
                 elif isinstance(command, tuple) and command[0] == "level":
                     state["level"] = command[1]
             root.after(100, pump)
@@ -226,6 +235,7 @@ class DictationApp:
         self.cancel_requested = False
         self.release_poll_active = False
         self.ollama_notice_shown = False
+        self.processing_stage = ""
         self.lock = threading.Lock()
 
     def run(self) -> None:
@@ -363,9 +373,6 @@ class DictationApp:
         print("Recording...")
 
     def _stop_recording_locked(self) -> None:
-        if self.indicator is not None:
-            self.indicator.hide()
-
         if self.stream is not None:
             self.stream.stop()
             self.stream.close()
@@ -379,6 +386,8 @@ class DictationApp:
 
         self.is_recording = False
         if self.cancel_requested:
+            if self.indicator is not None:
+                self.indicator.hide()
             self._refresh_status_locked()
             self._update_icon("busy" if self.active_jobs else "idle")
             print("Recording canceled.")
@@ -389,8 +398,11 @@ class DictationApp:
         self.frames = []
         self.target_hwnd = None
         self.active_jobs += 1
+        self.processing_stage = "Transcribing"
         self._refresh_status_locked()
         self._update_icon("busy")
+        if self.indicator is not None and not self.is_recording:
+            self.indicator.show("Transcribing")
         worker = threading.Thread(target=self._transcribe_and_paste, args=(frames, target_hwnd), daemon=True)
         self.worker_threads.append(worker)
         worker.start()
@@ -424,6 +436,7 @@ class DictationApp:
             wav_path = write_temp_wav(audio, self.config.sample_rate)
             try:
                 with self.transcription_lock:
+                    self._set_processing_stage("Transcribing")
                     model = self._get_model()
                     segments, _info = model.transcribe(
                         str(wav_path),
@@ -440,8 +453,10 @@ class DictationApp:
                 log_event("no speech detected")
                 return
 
+            self._set_processing_stage("Cleaning")
             output_text = self._cleanup_text(text)
             append_transcript_history(text, output_text, self.config.cleanup_mode)
+            self._set_processing_stage("Pasting")
             paste_text(output_text, target_hwnd=target_hwnd, restore_clipboard=self.config.restore_clipboard)
             print(f"Pasted: {output_text}")
         except Exception as exc:
@@ -450,6 +465,10 @@ class DictationApp:
         finally:
             with self.lock:
                 self.active_jobs = max(0, self.active_jobs - 1)
+                if self.active_jobs == 0:
+                    self.processing_stage = ""
+                    if self.indicator is not None and not self.is_recording:
+                        self.indicator.hide()
                 self._refresh_status_locked()
                 self._update_icon("recording" if self.is_recording else "busy" if self.active_jobs else "idle")
 
@@ -490,6 +509,7 @@ class DictationApp:
                 mode=self.config.cleanup_mode,
                 model=self.config.ollama_model,
                 base_url=self.config.ollama_base_url,
+                on_model_missing=lambda _model: self._set_processing_stage("Model missing, downloading now"),
             )
         except OllamaUnavailableError as exc:
             log_event(f"ollama unavailable, using raw transcript: {exc}")
@@ -505,6 +525,16 @@ class DictationApp:
         except Exception as exc:
             log_event(f"cleanup failed, using raw transcript: {exc}")
             return text
+
+    def _set_processing_stage(self, stage: str) -> None:
+        with self.lock:
+            if not self.active_jobs:
+                return
+            self.processing_stage = stage
+            if self.indicator is not None and not self.is_recording:
+                self.indicator.show(stage)
+            self._refresh_status_locked()
+            self._update_icon("busy")
 
     def _cancel_hotkey(self) -> str:
         key = self.config.cancel_key.strip().lower()
@@ -526,7 +556,7 @@ class DictationApp:
         elif self.is_recording:
             self.status = Status.RECORDING
         elif self.active_jobs:
-            self.status = Status.PROCESSING
+            self.status = self.processing_stage or Status.PROCESSING
         else:
             self.status = Status.IDLE
 
@@ -682,10 +712,16 @@ class OllamaUnavailableError(RuntimeError):
     pass
 
 
-def cleanup_with_ollama(text: str, mode: str, model: str, base_url: str) -> str:
+def cleanup_with_ollama(
+    text: str,
+    mode: str,
+    model: str,
+    base_url: str,
+    on_model_missing: Optional[Callable[[str], None]] = None,
+) -> str:
     if not ollama_is_available(base_url):
         raise OllamaUnavailableError("Ollama API is not reachable")
-    ensure_ollama_model(model, base_url)
+    ensure_ollama_model(model, base_url, on_model_missing=on_model_missing)
     prompt = cleanup_prompt(text, mode)
     response = ollama_generate(prompt, model, base_url)
     cleaned = normalize_spacing(response)
@@ -700,12 +736,18 @@ def ollama_is_available(base_url: str) -> bool:
         return False
 
 
-def ensure_ollama_model(model: str, base_url: str) -> None:
+def ensure_ollama_model(
+    model: str,
+    base_url: str,
+    on_model_missing: Optional[Callable[[str], None]] = None,
+) -> None:
     tags = ollama_request(base_url, "/api/tags", None, timeout=10)
     models = {item.get("name") for item in tags.get("models", [])}
     if model in models:
         return
     log_event(f"pulling ollama model {model}")
+    if on_model_missing is not None:
+        on_model_missing(model)
     ollama_request(base_url, "/api/pull", {"name": model, "stream": False}, timeout=1800)
     log_event(f"ollama model ready {model}")
 

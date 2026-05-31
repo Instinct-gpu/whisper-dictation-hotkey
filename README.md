@@ -9,7 +9,7 @@ It uses local Whisper transcription through `faster-whisper`, so recordings are 
 - Hold-to-record global hotkey
 - Local speech-to-text with Whisper
 - Automatic paste into the active text field
-- Small recording overlay with animated waveform
+- Small overlay with animated waveform and recording/transcribing/cleaning status
 - Daily transcript history logs
 - Tray icon with quick access to logs
 - Windows Startup and Start Menu shortcut support
@@ -65,6 +65,7 @@ Optional local cleanup:
 - Install Ollama from [ollama.com/download](https://ollama.com/download).
 - Keep Whisper Dictation in `Clean` or `Enhanced` mode.
 - On first cleanup use, Whisper Dictation automatically downloads `qwen2.5:1.5b` through Ollama.
+- If a cleanup model is missing, the overlay says `Model missing, downloading now` while Ollama pulls it.
 
 The installer copies the app to:
 
