@@ -63,7 +63,7 @@ For normal users, use the latest release ZIP from GitHub Releases:
 Optional local cleanup:
 
 - Install Ollama from [ollama.com/download](https://ollama.com/download).
-- Keep Whisper Dictation in `Clean`, `Bullets`, or `Enhanced` mode.
+- Keep Whisper Dictation in `Clean` or `Enhanced` mode.
 - On first cleanup use, Whisper Dictation automatically downloads `qwen2.5:1.5b` through Ollama.
 - If a cleanup model is missing, the overlay says `Model missing, downloading now` while Ollama pulls it.
 
@@ -162,8 +162,9 @@ Cleanup modes:
 
 - `raw`: paste Whisper's transcript directly.
 - `clean`: fix punctuation/casing and remove filler words while preserving meaning.
-- `bullets`: turn the transcript into a concise bullet list.
 - `enhanced`: more opinionated rewrite for clearer polished text.
+
+Clean and Enhanced can use bullet points when the transcript clearly contains tasks, options, steps, requirements, or multiple distinct ideas. They keep normal prose when bullets do not fit.
 
 Cleanup requires Ollama when `cleanup_engine` is `ollama`. If Ollama is not running, the app prompts once and falls back to raw dictation. If Ollama is running but the configured model is missing, the app pulls it automatically the first time cleanup is used.
 

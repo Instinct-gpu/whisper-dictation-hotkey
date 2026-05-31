@@ -250,7 +250,6 @@ class DictationApp:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Raw", self._use_raw_cleanup, checked=lambda item: self.config.cleanup_mode == "raw"),
                 pystray.MenuItem("Clean", self._use_clean_cleanup, checked=lambda item: self.config.cleanup_mode == "clean"),
-                pystray.MenuItem("Bullets", self._use_bullets_cleanup, checked=lambda item: self.config.cleanup_mode == "bullets"),
                 pystray.MenuItem("Enhanced", self._use_enhanced_cleanup, checked=lambda item: self.config.cleanup_mode == "enhanced"),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Use GPU", self._use_gpu, checked=lambda item: self.config.device == "cuda"),
@@ -305,9 +304,6 @@ class DictationApp:
 
     def _use_clean_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self._set_cleanup_mode("clean")
-
-    def _use_bullets_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
-        self._set_cleanup_mode("bullets")
 
     def _use_enhanced_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self._set_cleanup_mode("enhanced")
@@ -757,7 +753,7 @@ def ensure_ollama_model(
 
 
 def ollama_generate(prompt: str, model: str, base_url: str, mode: str) -> str:
-    predict_limit = 700 if mode == "enhanced" else 500 if mode == "bullets" else 350
+    predict_limit = 700 if mode == "enhanced" else 350
     data = ollama_request(
         base_url,
         "/api/generate",
@@ -792,22 +788,20 @@ def cleanup_prompt(text: str, mode: str) -> str:
     if mode == "enhanced":
         instruction = (
             "Rewrite the transcript into polished, clear text. Preserve the meaning, keep technical terms, "
-            "use light formatting when helpful, and remove filler words or false starts. Do not add facts."
-        )
-    elif mode == "bullets":
-        instruction = (
-            "Convert the transcript into a concise bullet list. Preserve the speaker's meaning and all important "
-            "details, group related points, and remove filler words or false starts. Do not add facts."
+            "remove filler words or false starts, and improve clarity without adding facts. Use short paragraphs by "
+            "default, but use bullet points when the speaker is listing tasks, options, steps, requirements, or "
+            "multiple distinct ideas."
         )
     else:
         instruction = (
             "Clean up the transcript. Fix punctuation and casing, remove filler words and repeated false starts, "
-            "but preserve the speaker's meaning and wording as much as possible. Do not summarize."
+            "but preserve the speaker's meaning and wording as much as possible. Do not summarize. Keep normal prose "
+            "by default, but use bullet points when the transcript clearly contains a list of tasks, options, steps, "
+            "requirements, or multiple distinct ideas."
         )
     return (
         f"{instruction}\n\n"
-        "Return only the final text. No commentary, labels, or quotes. "
-        "For bullet mode, each bullet must start with '- '.\n\n"
+        "Return only the final text. No commentary, labels, or quotes. If you use bullets, start each bullet with '- '.\n\n"
         "Transcript:\n"
         f"{text.strip()}"
     )
