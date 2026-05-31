@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SourceApp = Join-Path $PackageRoot "app\WhisperDictation"
 $SourceConfig = Join-Path $PackageRoot "config.json"
+$SourceEnvExample = Join-Path $PackageRoot ".env.example"
 $InstallRoot = Join-Path $env:LOCALAPPDATA "WhisperDictation"
 $InstallApp = Join-Path $InstallRoot "app\WhisperDictation"
 $Exe = Join-Path $InstallApp "WhisperDictation.exe"
@@ -26,6 +27,13 @@ Copy-Item -LiteralPath $SourceApp -Destination (Join-Path $InstallRoot "app") -R
 
 if ((Test-Path $SourceConfig) -and -not (Test-Path (Join-Path $InstallRoot "config.json"))) {
     Copy-Item -LiteralPath $SourceConfig -Destination (Join-Path $InstallRoot "config.json")
+}
+
+if (Test-Path $SourceEnvExample) {
+    Copy-Item -LiteralPath $SourceEnvExample -Destination (Join-Path $InstallRoot ".env.example") -Force
+    if (-not (Test-Path (Join-Path $InstallRoot ".env"))) {
+        Copy-Item -LiteralPath $SourceEnvExample -Destination (Join-Path $InstallRoot ".env")
+    }
 }
 
 $Shell = New-Object -ComObject WScript.Shell
@@ -52,4 +60,3 @@ Start-Process -FilePath $Exe -WorkingDirectory $InstallRoot -WindowStyle Hidden
 
 Write-Host "Whisper Dictation installed to $InstallRoot"
 Write-Host "It will start automatically when Windows starts."
-

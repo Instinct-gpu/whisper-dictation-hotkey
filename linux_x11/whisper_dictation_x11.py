@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
 import subprocess
@@ -25,6 +26,7 @@ from pynput import keyboard
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
+ENV_PATH = APP_DIR / ".env"
 LOG_DIR = APP_DIR / "log"
 
 
@@ -40,6 +42,8 @@ class AppConfig:
     cleanup_engine: str = "ollama"
     ollama_model: str = "qwen2.5:1.5b"
     ollama_base_url: str = "http://localhost:11434"
+    openai_model: str = "gpt-4.1-nano"
+    openai_base_url: str = "https://api.openai.com/v1"
 
 
 class RecordingOverlay:
@@ -326,9 +330,22 @@ class OllamaUnavailableError(RuntimeError):
     pass
 
 
+class OpenAIUnavailableError(RuntimeError):
+    pass
+
+
 def cleanup_text(text: str, config: AppConfig) -> str:
     if config.cleanup_mode == "raw" or config.cleanup_engine == "off":
         return text
+    if config.cleanup_engine == "openai":
+        try:
+            return cleanup_with_openai(text, config.cleanup_mode, config.openai_model, config.openai_base_url)
+        except OpenAIUnavailableError as exc:
+            print(f"OpenAI unavailable, using raw transcript: {exc}")
+            return text
+        except Exception as exc:
+            print(f"OpenAI cleanup failed, using raw transcript: {exc}")
+            return text
     if config.cleanup_engine != "ollama":
         return text
     try:
@@ -348,6 +365,49 @@ def cleanup_with_ollama(text: str, mode: str, model: str, base_url: str) -> str:
     response = ollama_generate(cleanup_prompt(text, mode), model, base_url, mode)
     cleaned = normalize_spacing(response)
     return cleaned or text
+
+
+def cleanup_with_openai(text: str, mode: str, model: str, base_url: str) -> str:
+    api_key = get_env_value("OPENAI_API_KEY")
+    if not api_key:
+        raise OpenAIUnavailableError("OPENAI_API_KEY is missing")
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": cleanup_instruction(mode)},
+            {"role": "user", "content": text.strip()},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 700 if mode == "enhanced" else 350,
+    }
+    data = openai_request(base_url, "/chat/completions", payload, api_key, timeout=45)
+    choices = data.get("choices", [])
+    if not choices:
+        return text
+    message = choices[0].get("message", {})
+    cleaned = normalize_spacing(str(message.get("content", "")))
+    return cleaned or text
+
+
+def openai_request(base_url: str, path: str, payload: dict, api_key: str, timeout: int) -> dict:
+    url = base_url.rstrip("/") + path
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise OpenAIUnavailableError(f"OpenAI API error {exc.code}: {body[:200]}") from exc
+    except urllib.error.URLError as exc:
+        raise OpenAIUnavailableError(str(exc)) from exc
+    return json.loads(body) if body else {}
 
 
 def ollama_is_available(base_url: str) -> bool:
@@ -400,6 +460,10 @@ def ollama_request(base_url: str, path: str, payload: Optional[dict], timeout: i
 
 
 def cleanup_prompt(text: str, mode: str) -> str:
+    return f"{cleanup_instruction(mode)}\n\nTranscript:\n{text.strip()}"
+
+
+def cleanup_instruction(mode: str) -> str:
     if mode == "enhanced":
         instruction = (
             "Rewrite the transcript into polished, clear text. Preserve the meaning, keep technical terms, "
@@ -416,10 +480,25 @@ def cleanup_prompt(text: str, mode: str) -> str:
         )
     return (
         f"{instruction}\n\n"
-        "Return only the final text. No commentary, labels, or quotes. If you use bullets, start each bullet with '- '.\n\n"
-        "Transcript:\n"
-        f"{text.strip()}"
+        "Return only the final text. No commentary, labels, or quotes. If you use bullets, start each bullet with '- '."
     )
+
+
+def load_env_file() -> dict[str, str]:
+    if not ENV_PATH.exists():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def get_env_value(key: str) -> Optional[str]:
+    return os.environ.get(key) or load_env_file().get(key)
 
 
 def append_history(raw_text: str, output_text: Optional[str] = None, mode: str = "raw") -> None:

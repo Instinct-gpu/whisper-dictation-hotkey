@@ -64,7 +64,9 @@ Default:
   "cleanup_mode": "clean",
   "cleanup_engine": "ollama",
   "ollama_model": "qwen2.5:1.5b",
-  "ollama_base_url": "http://localhost:11434"
+  "ollama_base_url": "http://localhost:11434",
+  "openai_model": "gpt-4.1-nano",
+  "openai_base_url": "https://api.openai.com/v1"
 }
 ```
 
@@ -78,7 +80,12 @@ Cleanup modes:
 
 Clean and Enhanced can use bullet points when the transcript clearly contains tasks, options, steps, requirements, or multiple distinct ideas. They keep normal prose when bullets do not fit.
 
-Cleanup requires Ollama when `cleanup_engine` is `ollama`. Install Ollama from [ollama.com/download](https://ollama.com/download). If Ollama is running but the configured model is missing, the app pulls `qwen2.5:1.5b` automatically the first time cleanup is used. If Ollama is not running, the script falls back to raw dictation.
+Cleanup engines:
+
+- `ollama`: local cleanup through Ollama. Install Ollama from [ollama.com/download](https://ollama.com/download). If Ollama is running but the configured model is missing, the app pulls `qwen2.5:1.5b` automatically the first time cleanup is used.
+- `openai`: cloud cleanup through the OpenAI API using `openai_model`. Put `OPENAI_API_KEY=your_key_here` in `linux_x11/.env`.
+
+If the configured cleanup engine is unavailable, the script falls back to raw dictation.
 
 ## Notes
 

@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 
 # Runtime files
+.env
 log/
 *.log
 *.lock
@@ -22,4 +23,3 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
-

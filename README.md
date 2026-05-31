@@ -60,12 +60,13 @@ For normal users, use the latest release ZIP from GitHub Releases:
 3. Right-click `install_windows.ps1` and choose **Run with PowerShell**.
 4. Hold `Ctrl+Shift+Space` to dictate.
 
-Optional local cleanup:
+Optional cleanup:
 
-- Install Ollama from [ollama.com/download](https://ollama.com/download).
+- Local: install Ollama from [ollama.com/download](https://ollama.com/download), then use `Use Ollama Cleanup`.
+- Cloud: add `OPENAI_API_KEY` to `.env`, then use `Use OpenAI Cleanup`.
 - Keep Whisper Dictation in `Clean` or `Enhanced` mode.
-- On first cleanup use, Whisper Dictation automatically downloads `qwen2.5:1.5b` through Ollama.
-- If a cleanup model is missing, the overlay says `Model missing, downloading now` while Ollama pulls it.
+- On first Ollama cleanup use, Whisper Dictation automatically downloads `qwen2.5:1.5b`.
+- If a local cleanup model is missing, the overlay says `Model missing, downloading now` while Ollama pulls it.
 
 The installer copies the app to:
 
@@ -146,7 +147,9 @@ Edit `config.json`:
   "cleanup_mode": "clean",
   "cleanup_engine": "ollama",
   "ollama_model": "qwen2.5:1.5b",
-  "ollama_base_url": "http://localhost:11434"
+  "ollama_base_url": "http://localhost:11434",
+  "openai_model": "gpt-4.1-nano",
+  "openai_base_url": "https://api.openai.com/v1"
 }
 ```
 
@@ -166,7 +169,20 @@ Cleanup modes:
 
 Clean and Enhanced can use bullet points when the transcript clearly contains tasks, options, steps, requirements, or multiple distinct ideas. They keep normal prose when bullets do not fit.
 
-Cleanup requires Ollama when `cleanup_engine` is `ollama`. If Ollama is not running, the app prompts once and falls back to raw dictation. If Ollama is running but the configured model is missing, the app pulls it automatically the first time cleanup is used.
+Cleanup engines:
+
+- `ollama`: local cleanup through Ollama. If Ollama is not running, the app prompts once and falls back to raw dictation. If the configured model is missing, the app pulls it automatically.
+- `openai`: cloud cleanup through the OpenAI API using `openai_model`.
+
+For OpenAI cleanup, copy `.env.example` to `.env` and add:
+
+```text
+OPENAI_API_KEY=your_key_here
+```
+
+The tray menu has `Use OpenAI Cleanup`, `Use Ollama Cleanup`, and `Open API Key File` options. The `.env` file is ignored by Git so API keys are not committed.
+
+Approximate OpenAI cleanup cost with `gpt-4.1-nano`: OpenAI currently lists `gpt-4.1-nano` at $0.10 per 1M input tokens and $0.40 per 1M output tokens. A normal short dictation cleanup is often around 150-500 input tokens and 100-300 output tokens, roughly $0.00006-$0.00017 per call. Longer enhanced rewrites cost more, but still usually fractions of a cent.
 
 ## Troubleshooting
 

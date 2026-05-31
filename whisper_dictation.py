@@ -35,6 +35,7 @@ if getattr(sys, "frozen", False):
 else:
     APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
+ENV_PATH = APP_DIR / ".env"
 LOCK_PATH = APP_DIR / "whisper_dictation.lock"
 LOG_PATH = APP_DIR / "whisper_dictation.log"
 TRANSCRIPT_LOG_DIR = APP_DIR / "log"
@@ -57,6 +58,8 @@ class AppConfig:
     cleanup_engine: str = "ollama"
     ollama_model: str = "qwen2.5:1.5b"
     ollama_base_url: str = "http://localhost:11434"
+    openai_model: str = "gpt-4.1-nano"
+    openai_base_url: str = "https://api.openai.com/v1"
 
 
 class Status:
@@ -235,6 +238,7 @@ class DictationApp:
         self.cancel_requested = False
         self.release_poll_active = False
         self.ollama_notice_shown = False
+        self.openai_notice_shown = False
         self.processing_stage = ""
         self.lock = threading.Lock()
 
@@ -247,10 +251,15 @@ class DictationApp:
                 pystray.MenuItem(lambda item: f"Status: {self.status}", None, enabled=False),
                 pystray.MenuItem(lambda item: f"Mode: {self._mode_label()}", None, enabled=False),
                 pystray.MenuItem(lambda item: f"Cleanup: {self.config.cleanup_mode.title()}", None, enabled=False),
+                pystray.MenuItem(lambda item: f"Engine: {self._cleanup_engine_label()}", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Raw", self._use_raw_cleanup, checked=lambda item: self.config.cleanup_mode == "raw"),
                 pystray.MenuItem("Clean", self._use_clean_cleanup, checked=lambda item: self.config.cleanup_mode == "clean"),
                 pystray.MenuItem("Enhanced", self._use_enhanced_cleanup, checked=lambda item: self.config.cleanup_mode == "enhanced"),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Use OpenAI Cleanup", self._use_openai_cleanup, checked=lambda item: self.config.cleanup_engine == "openai"),
+                pystray.MenuItem("Use Ollama Cleanup", self._use_ollama_cleanup, checked=lambda item: self.config.cleanup_engine == "ollama"),
+                pystray.MenuItem("Open API Key File", self._open_env_file),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Use GPU", self._use_gpu, checked=lambda item: self.config.device == "cuda"),
                 pystray.MenuItem("Use CPU", self._use_cpu, checked=lambda item: self.config.device == "cpu"),
@@ -299,6 +308,9 @@ class DictationApp:
     def _mode_label(self) -> str:
         return "GPU" if self.config.device == "cuda" else "CPU"
 
+    def _cleanup_engine_label(self) -> str:
+        return "OpenAI" if self.config.cleanup_engine == "openai" else "Ollama" if self.config.cleanup_engine == "ollama" else "Off"
+
     def _use_raw_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self._set_cleanup_mode("raw")
 
@@ -314,6 +326,23 @@ class DictationApp:
         log_event(f"cleanup mode set to {mode}")
         if self.icon is not None:
             self.icon.update_menu()
+
+    def _use_openai_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._set_cleanup_engine("openai")
+
+    def _use_ollama_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._set_cleanup_engine("ollama")
+
+    def _set_cleanup_engine(self, engine: str) -> None:
+        self.config.cleanup_engine = engine
+        save_config(self.config)
+        log_event(f"cleanup engine set to {engine}")
+        if self.icon is not None:
+            self.icon.update_menu()
+
+    def _open_env_file(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        ensure_env_file()
+        os.startfile(ENV_PATH)
 
     def _use_gpu(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self._set_compute_mode("cuda", "float16")
@@ -501,6 +530,28 @@ class DictationApp:
     def _cleanup_text(self, text: str) -> str:
         if self.config.cleanup_mode == "raw" or self.config.cleanup_engine == "off":
             return text
+        if self.config.cleanup_engine == "openai":
+            try:
+                return cleanup_with_openai(
+                    text=text,
+                    mode=self.config.cleanup_mode,
+                    model=self.config.openai_model,
+                    base_url=self.config.openai_base_url,
+                )
+            except OpenAIUnavailableError as exc:
+                log_event(f"openai cleanup unavailable, using raw transcript: {exc}")
+                if not self.openai_notice_shown:
+                    self.openai_notice_shown = True
+                    notify_user(
+                        "Whisper Dictation: OpenAI API Key Required",
+                        "OpenAI cleanup requires OPENAI_API_KEY in the .env file.\n\n"
+                        "Use the tray menu option 'Open API Key File', add your key, then restart the app.\n\n"
+                        "For now, raw transcripts will be pasted.",
+                    )
+                return text
+            except Exception as exc:
+                log_event(f"openai cleanup failed, using raw transcript: {exc}")
+                return text
         if self.config.cleanup_engine != "ollama":
             return text
         try:
@@ -712,6 +763,53 @@ class OllamaUnavailableError(RuntimeError):
     pass
 
 
+class OpenAIUnavailableError(RuntimeError):
+    pass
+
+
+def cleanup_with_openai(text: str, mode: str, model: str, base_url: str) -> str:
+    api_key = get_env_value("OPENAI_API_KEY")
+    if not api_key:
+        raise OpenAIUnavailableError("OPENAI_API_KEY is missing")
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": cleanup_instruction(mode)},
+            {"role": "user", "content": text.strip()},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 700 if mode == "enhanced" else 350,
+    }
+    data = openai_request(base_url, "/chat/completions", payload, api_key, timeout=45)
+    choices = data.get("choices", [])
+    if not choices:
+        return text
+    message = choices[0].get("message", {})
+    cleaned = normalize_output_text(str(message.get("content", "")))
+    return cleaned or text
+
+
+def openai_request(base_url: str, path: str, payload: dict, api_key: str, timeout: int) -> dict:
+    url = base_url.rstrip("/") + path
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise OpenAIUnavailableError(f"OpenAI API error {exc.code}: {body[:200]}") from exc
+    except urllib.error.URLError as exc:
+        raise OpenAIUnavailableError(str(exc)) from exc
+    return json.loads(body) if body else {}
+
+
 def cleanup_with_ollama(
     text: str,
     mode: str,
@@ -724,7 +822,7 @@ def cleanup_with_ollama(
     ensure_ollama_model(model, base_url, on_model_missing=on_model_missing)
     prompt = cleanup_prompt(text, mode)
     response = ollama_generate(prompt, model, base_url, mode)
-    cleaned = normalize_spacing(response)
+    cleaned = normalize_output_text(response)
     return cleaned or text
 
 
@@ -785,6 +883,10 @@ def ollama_request(base_url: str, path: str, payload: Optional[dict], timeout: i
 
 
 def cleanup_prompt(text: str, mode: str) -> str:
+    return f"{cleanup_instruction(mode)}\n\nTranscript:\n{text.strip()}"
+
+
+def cleanup_instruction(mode: str) -> str:
     if mode == "enhanced":
         instruction = (
             "Rewrite the transcript into polished, clear text. Preserve the meaning, keep technical terms, "
@@ -801,9 +903,7 @@ def cleanup_prompt(text: str, mode: str) -> str:
         )
     return (
         f"{instruction}\n\n"
-        "Return only the final text. No commentary, labels, or quotes. If you use bullets, start each bullet with '- '.\n\n"
-        "Transcript:\n"
-        f"{text.strip()}"
+        "Return only the final text. No commentary, labels, or quotes. If you use bullets, start each bullet with '- '."
     )
 
 
@@ -855,7 +955,7 @@ def log_event(message: str) -> None:
 
 def append_transcript_history(raw_text: str, output_text: Optional[str] = None, mode: str = "raw") -> None:
     raw = normalize_spacing(raw_text)
-    output = normalize_spacing(output_text) if output_text is not None else raw
+    output = normalize_output_text(output_text) if output_text is not None else raw
     if not raw:
         return
     TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True)
@@ -925,6 +1025,29 @@ def load_config() -> AppConfig:
     return AppConfig(**{key: value for key, value in data.items() if key in fields})
 
 
+def ensure_env_file() -> None:
+    if ENV_PATH.exists():
+        return
+    ENV_PATH.write_text("OPENAI_API_KEY=\n", encoding="utf-8")
+
+
+def load_env_file() -> dict[str, str]:
+    if not ENV_PATH.exists():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def get_env_value(key: str) -> Optional[str]:
+    return os.environ.get(key) or load_env_file().get(key)
+
+
 def save_config(config: AppConfig) -> None:
     data = {field: getattr(config, field) for field in AppConfig.__dataclass_fields__}
     CONFIG_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -970,7 +1093,7 @@ def paste_text(text: str, target_hwnd: Optional[int], restore_clipboard: bool = 
         except pyperclip.PyperclipException:
             previous = None
 
-    normalized = normalize_spacing(text)
+    normalized = normalize_output_text(text)
     pyperclip.copy(normalized)
     restore_foreground_window(target_hwnd)
     time.sleep(0.25)
@@ -985,6 +1108,20 @@ def paste_text(text: str, target_hwnd: Optional[int], restore_clipboard: bool = 
 def normalize_spacing(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def normalize_output_text(text: str) -> str:
+    lines = [normalize_spacing(line) for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    compact_lines: list[str] = []
+    previous_blank = False
+    for line in lines:
+        if line:
+            compact_lines.append(line)
+            previous_blank = False
+        elif compact_lines and not previous_blank:
+            compact_lines.append("")
+            previous_blank = True
+    return "\n".join(compact_lines).strip()
 
 
 def main() -> None:
