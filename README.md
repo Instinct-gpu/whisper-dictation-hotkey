@@ -14,6 +14,7 @@ It uses local Whisper transcription through `faster-whisper`, so recordings are 
 - Tray icon with quick access to logs
 - Windows Startup and Start Menu shortcut support
 - GPU/CPU mode switching from the tray menu
+- Optional local AI cleanup with Ollama
 
 ## Supported Platforms
 
@@ -58,6 +59,12 @@ For normal users, use the latest release ZIP from GitHub Releases:
 2. Extract the ZIP.
 3. Right-click `install_windows.ps1` and choose **Run with PowerShell**.
 4. Hold `Ctrl+Shift+Space` to dictate.
+
+Optional local cleanup:
+
+- Install Ollama from [ollama.com/download](https://ollama.com/download).
+- Keep Whisper Dictation in `Clean` or `Enhanced` mode.
+- On first cleanup use, Whisper Dictation automatically downloads `qwen2.5:1.5b` through Ollama.
 
 The installer copies the app to:
 
@@ -116,6 +123,8 @@ Entries look like this:
 
 Empty log files are not created. This is useful if text is pasted into the wrong place or an input field was not focused.
 
+If cleanup is enabled, history keeps both the raw transcript and the cleaned output when they differ.
+
 ## Configuration
 
 Edit `config.json`:
@@ -132,7 +141,11 @@ Edit `config.json`:
   "restore_clipboard": false,
   "sample_rate": 16000,
   "silence_trim": true,
-  "visual_indicator": true
+  "visual_indicator": true,
+  "cleanup_mode": "clean",
+  "cleanup_engine": "ollama",
+  "ollama_model": "qwen2.5:1.5b",
+  "ollama_base_url": "http://localhost:11434"
 }
 ```
 
@@ -143,6 +156,14 @@ Recommended model sizes:
 - `medium.en`: strong accuracy, much slower on CPU.
 
 The default tries GPU mode (`device: cuda`, `compute_type: float16`) for faster transcription. If GPU model loading fails, the app logs the error and falls back to CPU mode (`device: cpu`, `compute_type: int8`). You can also switch modes from the tray menu; the choice is saved to `config.json` and reused after restart.
+
+Cleanup modes:
+
+- `raw`: paste Whisper's transcript directly.
+- `clean`: fix punctuation/casing and remove filler words while preserving meaning.
+- `enhanced`: more opinionated rewrite for clearer polished text.
+
+Cleanup requires Ollama when `cleanup_engine` is `ollama`. If Ollama is not running, the app prompts once and falls back to raw dictation. If Ollama is running but the configured model is missing, the app pulls it automatically the first time cleanup is used.
 
 ## Troubleshooting
 
@@ -160,6 +181,11 @@ If global hotkeys do not work in an elevated app:
 If the first transcription is slow:
 
 - The first run may download the Whisper model and initialize the transcription engine.
+
+If cleanup is slow the first time:
+
+- Ollama may be downloading `qwen2.5:1.5b`.
+- Future cleanups are faster once the model is present.
 
 ## Linux/X11 Support
 

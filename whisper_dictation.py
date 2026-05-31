@@ -11,6 +11,8 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import urllib.error
+import urllib.request
 import wave
 from collections import deque
 from dataclasses import dataclass
@@ -51,6 +53,10 @@ class AppConfig:
     sample_rate: int = 16000
     silence_trim: bool = True
     visual_indicator: bool = True
+    cleanup_mode: str = "clean"
+    cleanup_engine: str = "ollama"
+    ollama_model: str = "qwen2.5:1.5b"
+    ollama_base_url: str = "http://localhost:11434"
 
 
 class Status:
@@ -219,6 +225,7 @@ class DictationApp:
         self.last_level_update = 0.0
         self.cancel_requested = False
         self.release_poll_active = False
+        self.ollama_notice_shown = False
         self.lock = threading.Lock()
 
     def run(self) -> None:
@@ -229,11 +236,17 @@ class DictationApp:
             menu=pystray.Menu(
                 pystray.MenuItem(lambda item: f"Status: {self.status}", None, enabled=False),
                 pystray.MenuItem(lambda item: f"Mode: {self._mode_label()}", None, enabled=False),
+                pystray.MenuItem(lambda item: f"Cleanup: {self.config.cleanup_mode.title()}", None, enabled=False),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Raw", self._use_raw_cleanup, checked=lambda item: self.config.cleanup_mode == "raw"),
+                pystray.MenuItem("Clean", self._use_clean_cleanup, checked=lambda item: self.config.cleanup_mode == "clean"),
+                pystray.MenuItem("Enhanced", self._use_enhanced_cleanup, checked=lambda item: self.config.cleanup_mode == "enhanced"),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Use GPU", self._use_gpu, checked=lambda item: self.config.device == "cuda"),
                 pystray.MenuItem("Use CPU", self._use_cpu, checked=lambda item: self.config.device == "cpu"),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Open Logs", self._open_logs),
+                pystray.MenuItem("Open History", self._open_history),
+                pystray.MenuItem("Open Logs Folder", self._open_logs),
                 pystray.MenuItem("Quit", self._quit),
             ),
         )
@@ -270,8 +283,27 @@ class DictationApp:
         TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True)
         os.startfile(TRANSCRIPT_LOG_DIR)
 
+    def _open_history(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        threading.Thread(target=open_history_window, daemon=True).start()
+
     def _mode_label(self) -> str:
         return "GPU" if self.config.device == "cuda" else "CPU"
+
+    def _use_raw_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._set_cleanup_mode("raw")
+
+    def _use_clean_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._set_cleanup_mode("clean")
+
+    def _use_enhanced_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._set_cleanup_mode("enhanced")
+
+    def _set_cleanup_mode(self, mode: str) -> None:
+        self.config.cleanup_mode = mode
+        save_config(self.config)
+        log_event(f"cleanup mode set to {mode}")
+        if self.icon is not None:
+            self.icon.update_menu()
 
     def _use_gpu(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self._set_compute_mode("cuda", "float16")
@@ -408,9 +440,10 @@ class DictationApp:
                 log_event("no speech detected")
                 return
 
-            append_transcript_history(text)
-            paste_text(text, target_hwnd=target_hwnd, restore_clipboard=self.config.restore_clipboard)
-            print(f"Pasted: {text}")
+            output_text = self._cleanup_text(text)
+            append_transcript_history(text, output_text, self.config.cleanup_mode)
+            paste_text(output_text, target_hwnd=target_hwnd, restore_clipboard=self.config.restore_clipboard)
+            print(f"Pasted: {output_text}")
         except Exception as exc:
             print(f"Dictation failed: {exc}", file=sys.stderr)
             log_event(f"dictation failed: {exc}")
@@ -445,6 +478,33 @@ class DictationApp:
                     if self.icon is not None:
                         self.icon.update_menu()
             return self.model
+
+    def _cleanup_text(self, text: str) -> str:
+        if self.config.cleanup_mode == "raw" or self.config.cleanup_engine == "off":
+            return text
+        if self.config.cleanup_engine != "ollama":
+            return text
+        try:
+            return cleanup_with_ollama(
+                text=text,
+                mode=self.config.cleanup_mode,
+                model=self.config.ollama_model,
+                base_url=self.config.ollama_base_url,
+            )
+        except OllamaUnavailableError as exc:
+            log_event(f"ollama unavailable, using raw transcript: {exc}")
+            if not self.ollama_notice_shown:
+                self.ollama_notice_shown = True
+                notify_user(
+                    "Whisper Dictation: Ollama Required",
+                    "Clean and Enhanced modes require Ollama.\n\n"
+                    "Install Ollama from https://ollama.com/download, then restart or keep using Raw mode.\n\n"
+                    "For now, raw transcripts will be pasted.",
+                )
+            return text
+        except Exception as exc:
+            log_event(f"cleanup failed, using raw transcript: {exc}")
+            return text
 
     def _cancel_hotkey(self) -> str:
         key = self.config.cancel_key.strip().lower()
@@ -618,6 +678,94 @@ def show_without_activation(root: tk.Tk) -> None:
     ctypes.windll.user32.SetWindowPos(hwnd, hwnd_topmost, 0, 0, 0, 0, swp_noactivate | swp_showwindow | 0x0001 | 0x0002)
 
 
+class OllamaUnavailableError(RuntimeError):
+    pass
+
+
+def cleanup_with_ollama(text: str, mode: str, model: str, base_url: str) -> str:
+    if not ollama_is_available(base_url):
+        raise OllamaUnavailableError("Ollama API is not reachable")
+    ensure_ollama_model(model, base_url)
+    prompt = cleanup_prompt(text, mode)
+    response = ollama_generate(prompt, model, base_url)
+    cleaned = normalize_spacing(response)
+    return cleaned or text
+
+
+def ollama_is_available(base_url: str) -> bool:
+    try:
+        ollama_request(base_url, "/api/tags", None, timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_ollama_model(model: str, base_url: str) -> None:
+    tags = ollama_request(base_url, "/api/tags", None, timeout=10)
+    models = {item.get("name") for item in tags.get("models", [])}
+    if model in models:
+        return
+    log_event(f"pulling ollama model {model}")
+    ollama_request(base_url, "/api/pull", {"name": model, "stream": False}, timeout=1800)
+    log_event(f"ollama model ready {model}")
+
+
+def ollama_generate(prompt: str, model: str, base_url: str) -> str:
+    data = ollama_request(
+        base_url,
+        "/api/generate",
+        {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 700,
+            },
+        },
+        timeout=300,
+    )
+    return str(data.get("response", "")).strip()
+
+
+def ollama_request(base_url: str, path: str, payload: Optional[dict], timeout: int) -> dict:
+    url = base_url.rstrip("/") + path
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.URLError as exc:
+        raise OllamaUnavailableError(str(exc)) from exc
+    return json.loads(body) if body else {}
+
+
+def cleanup_prompt(text: str, mode: str) -> str:
+    if mode == "enhanced":
+        instruction = (
+            "Rewrite the transcript into polished, clear text. Preserve the meaning, keep technical terms, "
+            "use light formatting when helpful, and remove filler words or false starts. Do not add facts."
+        )
+    else:
+        instruction = (
+            "Clean up the transcript. Fix punctuation and casing, remove filler words and repeated false starts, "
+            "but preserve the speaker's meaning and wording as much as possible. Do not summarize."
+        )
+    return (
+        f"{instruction}\n\n"
+        "Return only the final text. No commentary, labels, or quotes.\n\n"
+        "Transcript:\n"
+        f"{text.strip()}"
+    )
+
+
+def notify_user(title: str, message: str) -> None:
+    if sys.platform == "win32":
+        ctypes.windll.user32.MessageBoxW(0, message, title, 0x40)
+    else:
+        print(f"{title}: {message}")
+
+
 def get_foreground_window() -> Optional[int]:
     if sys.platform != "win32":
         return None
@@ -657,15 +805,55 @@ def log_event(message: str) -> None:
         log.write(f"[{timestamp}] {message}\n")
 
 
-def append_transcript_history(text: str) -> None:
-    normalized = normalize_spacing(text)
-    if not normalized:
+def append_transcript_history(raw_text: str, output_text: Optional[str] = None, mode: str = "raw") -> None:
+    raw = normalize_spacing(raw_text)
+    output = normalize_spacing(output_text) if output_text is not None else raw
+    if not raw:
         return
     TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True)
     log_path = TRANSCRIPT_LOG_DIR / f"{time.strftime('%Y-%m-%d')}.txt"
     timestamp = time.strftime("%H:%M:%S")
     with log_path.open("a", encoding="utf-8") as log:
-        log.write(f"[{timestamp}] {normalized}\n\n")
+        if output != raw:
+            log.write(f"[{timestamp}] {mode.upper()}\nRAW: {raw}\nOUTPUT: {output}\n\n")
+        else:
+            log.write(f"[{timestamp}] {raw}\n\n")
+
+
+def open_history_window() -> None:
+    TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True)
+    latest = sorted(TRANSCRIPT_LOG_DIR.glob("*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    content = "No dictation history yet."
+    if latest:
+        content = latest[0].read_text(encoding="utf-8")
+
+    root = tk.Tk()
+    root.title("Whisper Dictation History")
+    root.geometry("760x560")
+    root.configure(bg="#202020")
+
+    header = tk.Frame(root, bg="#202020", padx=16, pady=12)
+    header.pack(fill="x")
+    tk.Label(header, text="Dictation History", fg="#ffffff", bg="#202020", font=("Segoe UI", 14, "bold")).pack(side="left")
+
+    body = tk.Frame(root, bg="#202020", padx=16, pady=(0, 16))
+    body.pack(fill="both", expand=True)
+    text = tk.Text(
+        body,
+        bg="#111111",
+        fg="#f2f2f2",
+        insertbackground="#ffffff",
+        relief="flat",
+        wrap="word",
+        font=("Segoe UI", 10),
+        padx=12,
+        pady=12,
+    )
+    text.pack(fill="both", expand=True)
+    text.insert("1.0", content)
+    text.configure(state="disabled")
+
+    root.mainloop()
 
 
 def load_config() -> AppConfig:
