@@ -292,7 +292,7 @@ def load_config() -> AppConfig:
         config = AppConfig()
         CONFIG_PATH.write_text(json.dumps(config.__dict__, indent=2) + "\n", encoding="utf-8")
         return config
-    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
     fields = set(AppConfig.__dataclass_fields__)
     return AppConfig(**{key: value for key, value in data.items() if key in fields})
 

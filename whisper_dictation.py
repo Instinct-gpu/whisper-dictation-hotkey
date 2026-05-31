@@ -1233,7 +1233,7 @@ def open_history_window() -> None:
 def load_config() -> AppConfig:
     if not CONFIG_PATH.exists():
         return AppConfig()
-    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
     fields = {field.name for field in AppConfig.__dataclass_fields__.values()}
     return AppConfig(**{key: value for key, value in data.items() if key in fields})
 
