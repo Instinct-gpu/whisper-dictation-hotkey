@@ -107,6 +107,9 @@ class RecordingIndicator:
     def set_level(self, level: float) -> None:
         self.commands.put(("level", max(0.0, min(1.0, level))))
 
+    def open_settings(self, app: "DictationApp") -> None:
+        self.commands.put(("settings", app))
+
     def stop(self) -> None:
         self.commands.put("stop")
 
@@ -155,6 +158,7 @@ class RecordingIndicator:
             "level": 0.0,
             "levels": deque([0.0] * 112, maxlen=112),
             "started": time.monotonic(),
+            "settings": None,
         }
 
         def animate() -> None:
@@ -209,6 +213,8 @@ class RecordingIndicator:
                     state["started"] = time.monotonic()
                 elif isinstance(command, tuple) and command[0] == "level":
                     state["level"] = command[1]
+                elif isinstance(command, tuple) and command[0] == "settings":
+                    state["settings"] = open_settings_window(root, command[1], state["settings"])
             root.after(100, pump)
 
         self.ready.set()
@@ -252,6 +258,8 @@ class DictationApp:
                 pystray.MenuItem(lambda item: f"Mode: {self._mode_label()}", None, enabled=False),
                 pystray.MenuItem(lambda item: f"Cleanup: {self.config.cleanup_mode.title()}", None, enabled=False),
                 pystray.MenuItem(lambda item: f"Engine: {self._cleanup_engine_label()}", None, enabled=False),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Settings", self._open_settings),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Raw", self._use_raw_cleanup, checked=lambda item: self.config.cleanup_mode == "raw"),
                 pystray.MenuItem("Clean", self._use_clean_cleanup, checked=lambda item: self.config.cleanup_mode == "clean"),
@@ -305,6 +313,16 @@ class DictationApp:
     def _open_history(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         open_latest_history()
 
+    def _open_settings(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        if self.indicator is not None:
+            self.indicator.open_settings(self)
+        else:
+            def launch() -> None:
+                window = open_settings_window(None, self, None)
+                window.mainloop()
+
+            threading.Thread(target=launch, daemon=True).start()
+
     def _mode_label(self) -> str:
         return "GPU" if self.config.device == "cuda" else "CPU"
 
@@ -337,6 +355,20 @@ class DictationApp:
         self.config.cleanup_engine = engine
         save_config(self.config)
         log_event(f"cleanup engine set to {engine}")
+        if self.icon is not None:
+            self.icon.update_menu()
+
+    def apply_settings(self, updates: dict[str, Any]) -> None:
+        old_device = self.config.device
+        old_compute_type = self.config.compute_type
+        for key, value in updates.items():
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
+        if self.config.device != old_device or self.config.compute_type != old_compute_type:
+            with self.model_lock:
+                self.model = None
+        save_config(self.config)
+        log_event("settings updated")
         if self.icon is not None:
             self.icon.update_menu()
 
@@ -979,6 +1011,187 @@ def open_latest_history() -> None:
     except OSError as exc:
         log_event(f"failed to open history file: {exc}")
         notify_user("Whisper Dictation", f"Could not open history file:\n{latest[0]}")
+
+
+def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: Optional[tk.Toplevel]) -> tk.Toplevel:
+    if existing is not None and existing.winfo_exists():
+        existing.deiconify()
+        existing.lift()
+        existing.focus_force()
+        return existing
+
+    window = tk.Toplevel(parent) if parent is not None else tk.Tk()
+    window.title("Whisper Dictation Settings")
+    window.geometry("460x560")
+    window.resizable(False, False)
+    window.configure(bg="#1f1f1f")
+
+    try:
+        window.iconbitmap(default=str(APP_DIR / "assets" / "whisper-dictation.ico"))
+    except tk.TclError:
+        pass
+
+    cfg = app.config
+    mode_var = tk.StringVar(value=cfg.cleanup_mode)
+    engine_var = tk.StringVar(value=cfg.cleanup_engine)
+    compute_var = tk.StringVar(value="GPU" if cfg.device == "cuda" else "CPU")
+    hotkey_var = tk.StringVar(value=cfg.hotkey)
+    whisper_model_var = tk.StringVar(value=cfg.model_size)
+    openai_model_var = tk.StringVar(value=cfg.openai_model)
+    ollama_model_var = tk.StringVar(value=cfg.ollama_model)
+    status_var = tk.StringVar(value="Ready")
+
+    colors = {
+        "bg": "#1f1f1f",
+        "panel": "#292929",
+        "panel2": "#222222",
+        "fg": "#f4f4f4",
+        "muted": "#9a9a9a",
+        "line": "#3a3a3a",
+        "accent": "#ffffff",
+    }
+
+    def label(parent_frame: tk.Widget, text: str, color: str = "fg", size: int = 9, bold: bool = False) -> tk.Label:
+        font = ("Segoe UI", size, "bold" if bold else "normal")
+        return tk.Label(parent_frame, text=text, fg=colors[color], bg=parent_frame.cget("bg"), font=font)
+
+    def entry(parent_frame: tk.Widget, variable: tk.StringVar, show: str = "") -> tk.Entry:
+        return tk.Entry(
+            parent_frame,
+            textvariable=variable,
+            show=show,
+            bg="#151515",
+            fg=colors["fg"],
+            insertbackground=colors["fg"],
+            relief="flat",
+            font=("Segoe UI", 9),
+        )
+
+    def option(parent_frame: tk.Widget, variable: tk.StringVar, values: tuple[str, ...]) -> tk.OptionMenu:
+        control = tk.OptionMenu(parent_frame, variable, *values)
+        control.configure(
+            bg="#151515",
+            fg=colors["fg"],
+            activebackground="#333333",
+            activeforeground=colors["fg"],
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        control["menu"].configure(bg="#151515", fg=colors["fg"], activebackground="#333333", activeforeground=colors["fg"])
+        return control
+
+    def button(parent_frame: tk.Widget, text: str, command: Callable[[], None], primary: bool = False) -> tk.Button:
+        bg = "#f1f1f1" if primary else "#333333"
+        fg = "#111111" if primary else colors["fg"]
+        return tk.Button(
+            parent_frame,
+            text=text,
+            command=command,
+            bg=bg,
+            fg=fg,
+            activebackground="#ffffff" if primary else "#444444",
+            activeforeground=fg,
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=7,
+            font=("Segoe UI", 9, "bold" if primary else "normal"),
+            cursor="hand2",
+        )
+
+    def field(parent_frame: tk.Widget, title: str, control: tk.Widget) -> None:
+        wrap = tk.Frame(parent_frame, bg=colors["panel"])
+        wrap.pack(fill="x", pady=(0, 10))
+        label(wrap, title, "muted", 8, True).pack(anchor="w", pady=(0, 5))
+        control.pack(in_=wrap, fill="x", ipady=5)
+
+    def open_key_file() -> None:
+        ensure_env_file()
+        os.startfile(ENV_PATH)
+        status_var.set("Opened API key file")
+        refresh_key_status()
+
+    def refresh_key_status() -> None:
+        key_status.configure(
+            text="OpenAI key detected" if get_env_value("OPENAI_API_KEY") else "No OpenAI key found",
+            fg="#7bd88f" if get_env_value("OPENAI_API_KEY") else "#ffcc66",
+        )
+
+    def save() -> None:
+        compute = compute_var.get()
+        updates = {
+            "cleanup_mode": mode_var.get(),
+            "cleanup_engine": engine_var.get(),
+            "device": "cuda" if compute == "GPU" else "cpu",
+            "compute_type": "float16" if compute == "GPU" else "int8",
+            "hotkey": hotkey_var.get().strip() or cfg.hotkey,
+            "model_size": whisper_model_var.get().strip() or cfg.model_size,
+            "openai_model": openai_model_var.get().strip() or cfg.openai_model,
+            "ollama_model": ollama_model_var.get().strip() or cfg.ollama_model,
+        }
+        app.apply_settings(updates)
+        status_var.set("Saved")
+        window.after(550, window.destroy)
+
+    header = tk.Frame(window, bg=colors["bg"], padx=18, pady=(16, 10))
+    header.pack(fill="x")
+    label(header, "Whisper Dictation", size=15, bold=True).pack(anchor="w")
+    label(header, "Fast dictation, cleanup, and paste settings", "muted", 9).pack(anchor="w", pady=(3, 0))
+
+    body = tk.Frame(window, bg=colors["panel"], padx=16, pady=14)
+    body.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+
+    grid = tk.Frame(body, bg=colors["panel"])
+    grid.pack(fill="x")
+
+    left = tk.Frame(grid, bg=colors["panel"])
+    left.pack(side="left", fill="x", expand=True, padx=(0, 7))
+    right = tk.Frame(grid, bg=colors["panel"])
+    right.pack(side="left", fill="x", expand=True, padx=(7, 0))
+
+    field(left, "Cleanup", option(left, mode_var, ("raw", "clean", "enhanced")))
+    field(right, "Engine", option(right, engine_var, ("openai", "ollama", "off")))
+    field(left, "Transcription", option(left, compute_var, ("CPU", "GPU")))
+    field(right, "Hotkey", entry(right, hotkey_var))
+
+    label(body, "Models", "fg", 10, True).pack(anchor="w", pady=(4, 8))
+    field(body, "OpenAI cleanup model", entry(body, openai_model_var))
+    field(body, "Ollama cleanup model", entry(body, ollama_model_var))
+    field(body, "Whisper model", entry(body, whisper_model_var))
+
+    key_panel = tk.Frame(body, bg=colors["panel2"], padx=12, pady=10)
+    key_panel.pack(fill="x", pady=(2, 12))
+    key_row = tk.Frame(key_panel, bg=colors["panel2"])
+    key_row.pack(fill="x")
+    key_status = label(key_row, "", "muted", 9, True)
+    key_status.pack(side="left")
+    label(key_panel, "OpenAI cleanup is usually the fastest option and does not use your GPU.", "muted", 8).pack(anchor="w", pady=(5, 0))
+    refresh_key_status()
+
+    quick = tk.Frame(body, bg=colors["panel"])
+    quick.pack(fill="x", pady=(0, 10))
+    button(quick, "API Key", open_key_file).pack(side="left", fill="x", expand=True, padx=(0, 6))
+    button(quick, "History", open_latest_history).pack(side="left", fill="x", expand=True, padx=6)
+    button(quick, "Logs", lambda: (TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True), os.startfile(TRANSCRIPT_LOG_DIR))).pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+    footer = tk.Frame(window, bg=colors["bg"], padx=14, pady=(0, 14))
+    footer.pack(fill="x")
+    label(footer, "", "muted", 8).pack(side="left")
+    status_label = tk.Label(footer, textvariable=status_var, fg=colors["muted"], bg=colors["bg"], font=("Segoe UI", 8))
+    status_label.pack(side="left")
+    button(footer, "Cancel", window.destroy).pack(side="right", padx=(8, 0))
+    button(footer, "Save", save, primary=True).pack(side="right")
+
+    window.update_idletasks()
+    x = max(0, window.winfo_screenwidth() - window.winfo_width() - 28)
+    y = max(0, window.winfo_screenheight() - window.winfo_height() - 86)
+    window.geometry(f"+{x}+{y}")
+    window.lift()
+    window.focus_force()
+    return window
 
 
 def open_history_window() -> None:

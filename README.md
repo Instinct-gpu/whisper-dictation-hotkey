@@ -182,6 +182,8 @@ OPENAI_API_KEY=your_key_here
 
 The tray menu has `Use OpenAI Cleanup`, `Use Ollama Cleanup`, and `Open API Key File` options. The `.env` file is ignored by Git so API keys are not committed.
 
+The tray menu also includes `Settings`, a compact Windows settings window for switching cleanup mode, cleanup engine, CPU/GPU mode, hotkey, models, and opening the API key/history/log files.
+
 Approximate OpenAI cleanup cost with `gpt-4.1-nano`: OpenAI currently lists `gpt-4.1-nano` at $0.10 per 1M input tokens and $0.40 per 1M output tokens. A normal short dictation cleanup is often around 150-500 input tokens and 100-300 output tokens, roughly $0.00006-$0.00017 per call. Longer enhanced rewrites cost more, but still usually fractions of a cent.
 
 ## Troubleshooting
