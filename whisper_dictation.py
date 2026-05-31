@@ -107,8 +107,8 @@ class RecordingIndicator:
     def set_level(self, level: float) -> None:
         self.commands.put(("level", max(0.0, min(1.0, level))))
 
-    def open_settings(self, app: "DictationApp") -> None:
-        self.commands.put(("settings", app))
+    def open_app(self, app: "DictationApp", tab: str = "settings") -> None:
+        self.commands.put(("app", app, tab))
 
     def stop(self) -> None:
         self.commands.put("stop")
@@ -213,8 +213,8 @@ class RecordingIndicator:
                     state["started"] = time.monotonic()
                 elif isinstance(command, tuple) and command[0] == "level":
                     state["level"] = command[1]
-                elif isinstance(command, tuple) and command[0] == "settings":
-                    state["settings"] = open_settings_window(root, command[1], state["settings"])
+                elif isinstance(command, tuple) and command[0] == "app":
+                    state["settings"] = open_settings_window(root, command[1], state["settings"], command[2])
             root.after(100, pump)
 
         self.ready.set()
@@ -260,21 +260,7 @@ class DictationApp:
                 pystray.MenuItem(lambda item: f"Engine: {self._cleanup_engine_label()}", None, enabled=False),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Settings", self._open_settings),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Raw", self._use_raw_cleanup, checked=lambda item: self.config.cleanup_mode == "raw"),
-                pystray.MenuItem("Clean", self._use_clean_cleanup, checked=lambda item: self.config.cleanup_mode == "clean"),
-                pystray.MenuItem("Enhanced", self._use_enhanced_cleanup, checked=lambda item: self.config.cleanup_mode == "enhanced"),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Use OpenAI Cleanup", self._use_openai_cleanup, checked=lambda item: self.config.cleanup_engine == "openai"),
-                pystray.MenuItem("Use Ollama Cleanup", self._use_ollama_cleanup, checked=lambda item: self.config.cleanup_engine == "ollama"),
-                pystray.MenuItem("Open API Key File", self._open_env_file),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Use GPU", self._use_gpu, checked=lambda item: self.config.device == "cuda"),
-                pystray.MenuItem("Use CPU", self._use_cpu, checked=lambda item: self.config.device == "cpu"),
-                pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Open History", self._open_history),
-                pystray.MenuItem("Open Logs Folder", self._open_logs),
-                pystray.MenuItem("Quit", self._quit),
             ),
         )
 
@@ -311,17 +297,23 @@ class DictationApp:
         os.startfile(TRANSCRIPT_LOG_DIR)
 
     def _open_history(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
-        open_latest_history()
+        if self.indicator is not None:
+            self.indicator.open_app(self, "history")
+        else:
+            self._launch_app_window("history")
 
     def _open_settings(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         if self.indicator is not None:
-            self.indicator.open_settings(self)
+            self.indicator.open_app(self, "settings")
         else:
-            def launch() -> None:
-                window = open_settings_window(None, self, None)
-                window.mainloop()
+            self._launch_app_window("settings")
 
-            threading.Thread(target=launch, daemon=True).start()
+    def _launch_app_window(self, tab: str) -> None:
+        def launch() -> None:
+            window = open_settings_window(None, self, None, tab)
+            window.mainloop()
+
+        threading.Thread(target=launch, daemon=True).start()
 
     def _mode_label(self) -> str:
         return "GPU" if self.config.device == "cuda" else "CPU"
@@ -1013,7 +1005,7 @@ def open_latest_history() -> None:
         notify_user("Whisper Dictation", f"Could not open history file:\n{latest[0]}")
 
 
-def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: Optional[tk.Toplevel]) -> tk.Toplevel:
+def legacy_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: Optional[tk.Toplevel]) -> tk.Toplevel:
     if existing is not None and existing.winfo_exists():
         existing.deiconify()
         existing.lift()
@@ -1230,6 +1222,304 @@ def open_history_window() -> None:
     root.mainloop()
 
 
+def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: Optional[tk.Toplevel], initial_tab: str = "settings") -> tk.Toplevel:
+    if existing is not None and existing.winfo_exists():
+        existing.deiconify()
+        if hasattr(existing, "_show_tab"):
+            existing._show_tab(initial_tab)  # type: ignore[attr-defined]
+        existing.lift()
+        existing.focus_force()
+        return existing
+
+    colors = {
+        "bg": "#1f1f1f",
+        "panel": "#272727",
+        "panel2": "#202020",
+        "field": "#151515",
+        "line": "#3b3b3b",
+        "fg": "#f4f4f4",
+        "muted": "#a0a0a0",
+        "good": "#7bd88f",
+        "warn": "#ffcc66",
+    }
+
+    window = tk.Toplevel(parent) if parent is not None else tk.Tk()
+    window.title("Whisper Dictation")
+    window.geometry("520x620")
+    window.minsize(520, 620)
+    window.resizable(False, False)
+    window.configure(bg=colors["bg"])
+    window.update_idletasks()
+    enable_dark_title_bar(window)
+
+    try:
+        window.iconbitmap(default=str(APP_DIR / "assets" / "whisper-dictation.ico"))
+    except tk.TclError:
+        pass
+
+    active_tab = tk.StringVar(value=initial_tab if initial_tab in {"settings", "history"} else "settings")
+    status_var = tk.StringVar(value="Ready")
+
+    def label(parent_frame: tk.Widget, text: str, color: str = "fg", size: int = 9, bold: bool = False) -> tk.Label:
+        return tk.Label(
+            parent_frame,
+            text=text,
+            fg=colors[color],
+            bg=parent_frame.cget("bg"),
+            font=("Segoe UI", size, "bold" if bold else "normal"),
+        )
+
+    def flat_button(parent_frame: tk.Widget, text: str, command: Callable[[], None], primary: bool = False) -> tk.Button:
+        bg = "#eeeeee" if primary else "#343434"
+        fg = "#111111" if primary else colors["fg"]
+        return tk.Button(
+            parent_frame,
+            text=text,
+            command=command,
+            bg=bg,
+            fg=fg,
+            activebackground="#ffffff" if primary else "#444444",
+            activeforeground=fg,
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=7,
+            font=("Segoe UI", 9, "bold" if primary else "normal"),
+            cursor="hand2",
+        )
+
+    def text_entry(parent_frame: tk.Widget, variable: tk.StringVar, show: str = "") -> tk.Entry:
+        return tk.Entry(
+            parent_frame,
+            textvariable=variable,
+            show=show,
+            bg=colors["field"],
+            fg=colors["fg"],
+            insertbackground=colors["fg"],
+            relief="flat",
+            font=("Segoe UI", 9),
+        )
+
+    def segmented(parent_frame: tk.Widget, variable: tk.StringVar, values: tuple[tuple[str, str], ...]) -> tk.Frame:
+        frame = tk.Frame(parent_frame, bg=colors["field"], padx=2, pady=2)
+        buttons: list[tk.Button] = []
+
+        def refresh() -> None:
+            for button_control, (_, value) in zip(buttons, values):
+                selected = variable.get() == value
+                button_control.configure(
+                    bg="#f2f2f2" if selected else colors["field"],
+                    fg="#111111" if selected else colors["fg"],
+                    activebackground="#f2f2f2" if selected else "#333333",
+                    activeforeground="#111111" if selected else colors["fg"],
+                )
+
+        for title, value in values:
+            def select(next_value: str = value) -> None:
+                variable.set(next_value)
+                refresh()
+
+            control = tk.Button(
+                frame,
+                text=title,
+                command=select,
+                relief="flat",
+                borderwidth=0,
+                padx=10,
+                pady=6,
+                font=("Segoe UI", 9, "bold"),
+                cursor="hand2",
+            )
+            control.pack(side="left", fill="x", expand=True)
+            buttons.append(control)
+        refresh()
+        return frame
+
+    header = tk.Frame(window, bg=colors["bg"], padx=18, pady=(16, 10))
+    header.pack(fill="x")
+    label(header, "Whisper Dictation", size=15, bold=True).pack(anchor="w")
+    label(header, "Fast dictation cleanup and history", "muted", 9).pack(anchor="w", pady=(3, 0))
+
+    nav = tk.Frame(window, bg=colors["bg"], padx=14, pady=(0, 10))
+    nav.pack(fill="x")
+    tab_buttons: dict[str, tk.Button] = {}
+
+    content = tk.Frame(window, bg=colors["panel"], padx=16, pady=14)
+    content.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+
+    def clear_content() -> None:
+        for child in content.winfo_children():
+            child.destroy()
+
+    def refresh_tabs() -> None:
+        for tab_name, button_control in tab_buttons.items():
+            selected = active_tab.get() == tab_name
+            button_control.configure(bg="#eeeeee" if selected else "#303030", fg="#111111" if selected else colors["fg"])
+
+    def show_tab(tab_name: str) -> None:
+        active_tab.set(tab_name)
+        refresh_tabs()
+        clear_content()
+        if tab_name == "history":
+            render_history()
+        else:
+            render_settings()
+
+    for title, tab_name in (("Settings", "settings"), ("History", "history")):
+        control = flat_button(nav, title, lambda next_tab=tab_name: show_tab(next_tab), primary=False)
+        control.pack(side="left", fill="x", expand=True, padx=(0, 8) if tab_name == "settings" else (8, 0))
+        tab_buttons[tab_name] = control
+
+    mode_var = tk.StringVar(value=app.config.cleanup_mode)
+    engine_var = tk.StringVar(value=app.config.cleanup_engine)
+    compute_var = tk.StringVar(value="gpu" if app.config.device == "cuda" else "cpu")
+    hotkey_var = tk.StringVar(value=app.config.hotkey)
+    whisper_model_var = tk.StringVar(value=app.config.model_size)
+    openai_model_var = tk.StringVar(value=app.config.openai_model)
+    ollama_model_var = tk.StringVar(value=app.config.ollama_model)
+    api_key_var = tk.StringVar(value=get_env_value("OPENAI_API_KEY") or "")
+
+    def field(parent_frame: tk.Widget, title: str, widget: tk.Widget, hint: str = "") -> None:
+        wrap = tk.Frame(parent_frame, bg=colors["panel"])
+        wrap.pack(fill="x", pady=(0, 11))
+        label(wrap, title, "muted", 8, True).pack(anchor="w", pady=(0, 5))
+        widget.pack(in_=wrap, fill="x", ipady=5)
+        if hint:
+            label(wrap, hint, "muted", 8).pack(anchor="w", pady=(4, 0))
+
+    def save_api_key() -> None:
+        set_env_value("OPENAI_API_KEY", api_key_var.get().strip())
+
+    def save_settings() -> None:
+        save_api_key()
+        compute = compute_var.get()
+        app.apply_settings(
+            {
+                "cleanup_mode": mode_var.get(),
+                "cleanup_engine": engine_var.get(),
+                "device": "cuda" if compute == "gpu" else "cpu",
+                "compute_type": "float16" if compute == "gpu" else "int8",
+                "hotkey": hotkey_var.get().strip() or app.config.hotkey,
+                "model_size": whisper_model_var.get().strip() or app.config.model_size,
+                "openai_model": openai_model_var.get().strip() or app.config.openai_model,
+                "ollama_model": ollama_model_var.get().strip() or app.config.ollama_model,
+            }
+        )
+        status_var.set("Saved")
+        show_tab("settings")
+
+    def render_settings() -> None:
+        label(content, "Behavior", size=10, bold=True).pack(anchor="w", pady=(0, 8))
+        field(content, "Cleanup mode", segmented(content, mode_var, (("Raw", "raw"), ("Clean", "clean"), ("Enhanced", "enhanced"))))
+        field(content, "Cleanup engine", segmented(content, engine_var, (("OpenAI", "openai"), ("Ollama", "ollama"), ("Off", "off"))))
+        field(content, "Transcription", segmented(content, compute_var, (("CPU", "cpu"), ("GPU", "gpu"))), "GPU is best for NVIDIA CUDA systems with available headroom.")
+
+        label(content, "Inputs", size=10, bold=True).pack(anchor="w", pady=(3, 8))
+        field(content, "Hotkey", text_entry(content, hotkey_var))
+        field(content, "OpenAI API key", text_entry(content, api_key_var, show="*"))
+
+        key_row = tk.Frame(content, bg=colors["panel"])
+        key_row.pack(fill="x", pady=(0, 12))
+        flat_button(key_row, "Get API key", lambda: os.startfile("https://platform.openai.com/api-keys")).pack(side="left")
+        label(key_row, "Stored locally in .env and ignored by Git.", "muted", 8).pack(side="left", padx=(10, 0))
+
+        label(content, "Models", size=10, bold=True).pack(anchor="w", pady=(3, 8))
+        field(content, "OpenAI model", text_entry(content, openai_model_var))
+        field(content, "Ollama model", text_entry(content, ollama_model_var))
+        field(content, "Whisper model", text_entry(content, whisper_model_var))
+
+    def render_history() -> None:
+        label(content, "History", size=10, bold=True).pack(anchor="w", pady=(0, 2))
+        label(content, "Latest daily dictations. Copy grabs the cleaned output when available.", "muted", 8).pack(anchor="w", pady=(0, 10))
+
+        entries = read_history_entries()
+        if not entries:
+            empty = tk.Frame(content, bg=colors["panel2"], padx=14, pady=20)
+            empty.pack(fill="x", pady=(8, 0))
+            label(empty, "No dictation history yet.", "muted", 9, True).pack(anchor="w")
+            return
+
+        canvas = tk.Canvas(content, bg=colors["panel"], highlightthickness=0, height=420)
+        scrollbar = tk.Scrollbar(content, orient="vertical", command=canvas.yview)
+        list_frame = tk.Frame(canvas, bg=colors["panel"])
+        list_frame.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=list_frame, anchor="nw", width=455)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        for item in entries[:30]:
+            card = tk.Frame(list_frame, bg=colors["panel2"], padx=12, pady=10)
+            card.pack(fill="x", pady=(0, 10), padx=(0, 8))
+            top = tk.Frame(card, bg=colors["panel2"])
+            top.pack(fill="x")
+            label(top, item["time"], "muted", 8, True).pack(side="left")
+            flat_button(top, "Copy", lambda text=item["text"]: copy_history_text(text), primary=False).pack(side="right")
+            message = tk.Message(card, text=item["text"], width=375, fg=colors["fg"], bg=colors["panel2"], font=("Segoe UI", 9))
+            message.pack(anchor="w", pady=(7, 0))
+
+    def copy_history_text(text: str) -> None:
+        pyperclip.copy(text)
+        status_var.set("Copied history entry")
+
+    footer = tk.Frame(window, bg=colors["bg"], padx=14, pady=(0, 14))
+    footer.pack(fill="x")
+    tk.Label(footer, textvariable=status_var, fg=colors["muted"], bg=colors["bg"], font=("Segoe UI", 8)).pack(side="left")
+    flat_button(footer, "Quit App", lambda: app._quit(app.icon, None) if app.icon is not None else window.destroy()).pack(side="right", padx=(8, 0))
+    flat_button(footer, "Save", save_settings, primary=True).pack(side="right")
+
+    window._show_tab = show_tab  # type: ignore[attr-defined]
+    show_tab(active_tab.get())
+    window.update_idletasks()
+    x = max(0, window.winfo_screenwidth() - window.winfo_width() - 28)
+    y = max(0, window.winfo_screenheight() - window.winfo_height() - 86)
+    window.geometry(f"+{x}+{y}")
+    window.lift()
+    window.focus_force()
+    return window
+
+
+def read_history_entries() -> list[dict[str, str]]:
+    TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True)
+    latest = sorted(TRANSCRIPT_LOG_DIR.glob("*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not latest:
+        return []
+    content = latest[0].read_text(encoding="utf-8")
+    entries: list[dict[str, str]] = []
+    for block in re.split(r"\n\s*\n", content.strip()):
+        block = block.strip()
+        if not block:
+            continue
+        match = re.match(r"^\[(?P<time>[^\]]+)\]\s*(?P<body>.*)$", block, flags=re.DOTALL)
+        if not match:
+            continue
+        body = match.group("body").strip()
+        output_match = re.search(r"(?:^|\n)OUTPUT:\s*(?P<output>.*)$", body, flags=re.DOTALL)
+        if output_match:
+            text = output_match.group("output").strip()
+        else:
+            text = re.sub(r"^(RAW|CLEAN|ENHANCED|RAW:)\s*", "", body).strip()
+        text = normalize_output_text(text)
+        if text:
+            entries.append({"time": match.group("time"), "text": text})
+    return list(reversed(entries))
+
+
+def enable_dark_title_bar(window: tk.Toplevel) -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = window.winfo_id()
+        value = ctypes.c_int(1)
+        dwm = ctypes.windll.dwmapi
+        for attribute in (20, 19):
+            result = dwm.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
+            if result == 0:
+                break
+    except Exception:
+        pass
+
+
 def load_config() -> AppConfig:
     if not CONFIG_PATH.exists():
         return AppConfig()
@@ -1259,6 +1549,15 @@ def load_env_file() -> dict[str, str]:
 
 def get_env_value(key: str) -> Optional[str]:
     return os.environ.get(key) or load_env_file().get(key)
+
+
+def set_env_value(key: str, value: str) -> None:
+    values = load_env_file()
+    values[key] = value
+    lines = [f"{name}={stored_value}" for name, stored_value in values.items()]
+    if key not in values:
+        lines.append(f"{key}={value}")
+    ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def save_config(config: AppConfig) -> None:
