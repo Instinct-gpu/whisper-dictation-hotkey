@@ -8,6 +8,8 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import urllib.error
+import urllib.request
 import wave
 from collections import deque
 from dataclasses import dataclass
@@ -34,6 +36,10 @@ class AppConfig:
     compute_type: str = "int8"
     language: Optional[str] = "en"
     sample_rate: int = 16000
+    cleanup_mode: str = "clean"
+    cleanup_engine: str = "ollama"
+    ollama_model: str = "qwen2.5:1.5b"
+    ollama_base_url: str = "http://localhost:11434"
 
 
 class RecordingOverlay:
@@ -238,9 +244,10 @@ class X11DictationApp:
             wav_path.unlink(missing_ok=True)
         if not text:
             return
-        append_history(text)
-        paste_text(text)
-        print(text)
+        output_text = cleanup_text(text, self.config)
+        append_history(text, output_text, self.config.cleanup_mode)
+        paste_text(output_text)
+        print(output_text)
 
     def _get_model(self) -> WhisperModel:
         with self.model_lock:
@@ -315,13 +322,112 @@ def normalize_spacing(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def append_history(text: str) -> None:
-    normalized = normalize_spacing(text)
-    if not normalized:
+class OllamaUnavailableError(RuntimeError):
+    pass
+
+
+def cleanup_text(text: str, config: AppConfig) -> str:
+    if config.cleanup_mode == "raw" or config.cleanup_engine == "off":
+        return text
+    if config.cleanup_engine != "ollama":
+        return text
+    try:
+        return cleanup_with_ollama(text, config.cleanup_mode, config.ollama_model, config.ollama_base_url)
+    except OllamaUnavailableError as exc:
+        print(f"Ollama unavailable, using raw transcript: {exc}")
+        return text
+    except Exception as exc:
+        print(f"Cleanup failed, using raw transcript: {exc}")
+        return text
+
+
+def cleanup_with_ollama(text: str, mode: str, model: str, base_url: str) -> str:
+    if not ollama_is_available(base_url):
+        raise OllamaUnavailableError("Ollama API is not reachable")
+    ensure_ollama_model(model, base_url)
+    response = ollama_generate(cleanup_prompt(text, mode), model, base_url)
+    cleaned = normalize_spacing(response)
+    return cleaned or text
+
+
+def ollama_is_available(base_url: str) -> bool:
+    try:
+        ollama_request(base_url, "/api/tags", None, timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_ollama_model(model: str, base_url: str) -> None:
+    tags = ollama_request(base_url, "/api/tags", None, timeout=10)
+    models = {item.get("name") for item in tags.get("models", [])}
+    if model in models:
+        return
+    print(f"Pulling Ollama model {model}. This may take a while the first time.")
+    ollama_request(base_url, "/api/pull", {"name": model, "stream": False}, timeout=1800)
+
+
+def ollama_generate(prompt: str, model: str, base_url: str) -> str:
+    data = ollama_request(
+        base_url,
+        "/api/generate",
+        {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 700,
+            },
+        },
+        timeout=300,
+    )
+    return str(data.get("response", "")).strip()
+
+
+def ollama_request(base_url: str, path: str, payload: Optional[dict], timeout: int) -> dict:
+    url = base_url.rstrip("/") + path
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.URLError as exc:
+        raise OllamaUnavailableError(str(exc)) from exc
+    return json.loads(body) if body else {}
+
+
+def cleanup_prompt(text: str, mode: str) -> str:
+    if mode == "enhanced":
+        instruction = (
+            "Rewrite the transcript into polished, clear text. Preserve the meaning, keep technical terms, "
+            "use light formatting when helpful, and remove filler words or false starts. Do not add facts."
+        )
+    else:
+        instruction = (
+            "Clean up the transcript. Fix punctuation and casing, remove filler words and repeated false starts, "
+            "but preserve the speaker's meaning and wording as much as possible. Do not summarize."
+        )
+    return (
+        f"{instruction}\n\n"
+        "Return only the final text. No commentary, labels, or quotes.\n\n"
+        "Transcript:\n"
+        f"{text.strip()}"
+    )
+
+
+def append_history(raw_text: str, output_text: Optional[str] = None, mode: str = "raw") -> None:
+    raw = normalize_spacing(raw_text)
+    output = normalize_spacing(output_text) if output_text is not None else raw
+    if not raw:
         return
     LOG_DIR.mkdir(exist_ok=True)
     path = LOG_DIR / f"{time.strftime('%Y-%m-%d')}.txt"
-    path.open("a", encoding="utf-8").write(f"[{time.strftime('%H:%M:%S')}] {normalized}\n\n")
+    with path.open("a", encoding="utf-8") as log:
+        if output != raw:
+            log.write(f"[{time.strftime('%H:%M:%S')}] {mode.upper()}\nRAW: {raw}\nOUTPUT: {output}\n\n")
+        else:
+            log.write(f"[{time.strftime('%H:%M:%S')}] {raw}\n\n")
 
 
 def paste_text(text: str) -> None:

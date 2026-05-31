@@ -200,6 +200,7 @@ The X11 app has the same basic shape:
 - Copy and paste via the X11 clipboard/`xdotool`.
 - Save daily transcript logs.
 - Show a small recording overlay.
+- Use the same Ollama cleanup config and automatic `qwen2.5:1.5b` pull.
 
 ## License
 
