@@ -116,17 +116,21 @@ class RecordingIndicator:
     def _run(self) -> None:
         root = tk.Tk()
         root.withdraw()
-        root.overrideredirect(True)
-        root.attributes("-topmost", True)
         root.configure(bg="#242424")
+
+        overlay = tk.Toplevel(root)
+        overlay.withdraw()
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        overlay.configure(bg="#242424")
 
         width = 442
         height = 87
-        x = root.winfo_screenwidth() - width - 18
-        y = root.winfo_screenheight() - height - 64
-        root.geometry(f"{width}x{height}+{x}+{y}")
+        x = overlay.winfo_screenwidth() - width - 18
+        y = overlay.winfo_screenheight() - height - 64
+        overlay.geometry(f"{width}x{height}+{x}+{y}")
 
-        frame = tk.Frame(root, bg="#242424", padx=14, pady=10)
+        frame = tk.Frame(overlay, bg="#242424", padx=14, pady=10)
         frame.pack(fill="both", expand=True)
 
         title_label = tk.Label(
@@ -202,9 +206,9 @@ class RecordingIndicator:
                     state["levels"].extend([0.0] * 112)
                     state["level"] = 0.0
                     state["started"] = time.monotonic()
-                    show_without_activation(root)
+                    show_without_activation(overlay)
                 elif command == "hide":
-                    root.withdraw()
+                    overlay.withdraw()
                 elif command == "stop":
                     root.destroy()
                     return
@@ -218,7 +222,7 @@ class RecordingIndicator:
             root.after(100, pump)
 
         self.ready.set()
-        make_no_activate(root)
+        make_no_activate(overlay)
         animate()
         pump()
         root.mainloop()
@@ -1379,11 +1383,12 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
     ollama_model_var = tk.StringVar(value=app.config.ollama_model)
     api_key_var = tk.StringVar(value=get_env_value("OPENAI_API_KEY") or "")
 
-    def field(parent_frame: tk.Widget, title: str, widget: tk.Widget, hint: str = "") -> None:
+    def field(parent_frame: tk.Widget, title: str, factory: Callable[[tk.Widget], tk.Widget], hint: str = "") -> None:
         wrap = tk.Frame(parent_frame, bg=colors["panel"])
         wrap.pack(fill="x", pady=(0, 11))
         label(wrap, title, "muted", 8, True).pack(anchor="w", pady=(0, 5))
-        widget.pack(in_=wrap, fill="x", ipady=5)
+        widget = factory(wrap)
+        widget.pack(fill="x", ipady=5)
         if hint:
             label(wrap, hint, "muted", 8).pack(anchor="w", pady=(4, 0))
 
@@ -1410,13 +1415,13 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
 
     def render_settings() -> None:
         label(content, "Behavior", size=10, bold=True).pack(anchor="w", pady=(0, 8))
-        field(content, "Cleanup mode", segmented(content, mode_var, (("Raw", "raw"), ("Clean", "clean"), ("Enhanced", "enhanced"))))
-        field(content, "Cleanup engine", segmented(content, engine_var, (("OpenAI", "openai"), ("Ollama", "ollama"), ("Off", "off"))))
-        field(content, "Transcription", segmented(content, compute_var, (("CPU", "cpu"), ("GPU", "gpu"))), "GPU is best for NVIDIA CUDA systems with available headroom.")
+        field(content, "Cleanup mode", lambda parent_frame: segmented(parent_frame, mode_var, (("Raw", "raw"), ("Clean", "clean"), ("Enhanced", "enhanced"))))
+        field(content, "Cleanup engine", lambda parent_frame: segmented(parent_frame, engine_var, (("OpenAI", "openai"), ("Ollama", "ollama"), ("Off", "off"))))
+        field(content, "Transcription", lambda parent_frame: segmented(parent_frame, compute_var, (("CPU", "cpu"), ("GPU", "gpu"))), "GPU is best for NVIDIA CUDA systems with available headroom.")
 
         label(content, "Inputs", size=10, bold=True).pack(anchor="w", pady=(3, 8))
-        field(content, "Hotkey", text_entry(content, hotkey_var))
-        field(content, "OpenAI API key", text_entry(content, api_key_var, show="*"))
+        field(content, "Hotkey", lambda parent_frame: text_entry(parent_frame, hotkey_var))
+        field(content, "OpenAI API key", lambda parent_frame: text_entry(parent_frame, api_key_var, show="*"))
 
         key_row = tk.Frame(content, bg=colors["panel"])
         key_row.pack(fill="x", pady=(0, 12))
@@ -1424,9 +1429,9 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
         label(key_row, "Stored locally in .env and ignored by Git.", "muted", 8).pack(side="left", padx=(10, 0))
 
         label(content, "Models", size=10, bold=True).pack(anchor="w", pady=(3, 8))
-        field(content, "OpenAI model", text_entry(content, openai_model_var))
-        field(content, "Ollama model", text_entry(content, ollama_model_var))
-        field(content, "Whisper model", text_entry(content, whisper_model_var))
+        field(content, "OpenAI model", lambda parent_frame: text_entry(parent_frame, openai_model_var))
+        field(content, "Ollama model", lambda parent_frame: text_entry(parent_frame, ollama_model_var))
+        field(content, "Whisper model", lambda parent_frame: text_entry(parent_frame, whisper_model_var))
 
     def render_history() -> None:
         label(content, "History", size=10, bold=True).pack(anchor="w", pady=(0, 2))
