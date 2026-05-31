@@ -45,8 +45,8 @@ class AppConfig:
     hotkey: str = "<ctrl>+<shift>+space"
     cancel_key: str = "esc"
     model_size: str = "base.en"
-    device: str = "cuda"
-    compute_type: str = "float16"
+    device: str = "cpu"
+    compute_type: str = "int8"
     language: Optional[str] = "en"
     paste_method: str = "clipboard"
     restore_clipboard: bool = False

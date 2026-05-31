@@ -134,8 +134,8 @@ Edit `config.json`:
   "hotkey": "<ctrl>+<shift>+space",
   "cancel_key": "esc",
   "model_size": "base.en",
-  "device": "cuda",
-  "compute_type": "float16",
+  "device": "cpu",
+  "compute_type": "int8",
   "language": "en",
   "paste_method": "clipboard",
   "restore_clipboard": false,
@@ -155,7 +155,7 @@ Recommended model sizes:
 - `small.en`: better accuracy, slower.
 - `medium.en`: strong accuracy, much slower on CPU.
 
-The default tries GPU mode (`device: cuda`, `compute_type: float16`) for faster transcription. If GPU model loading fails, the app logs the error and falls back to CPU mode (`device: cpu`, `compute_type: int8`). You can also switch modes from the tray menu; the choice is saved to `config.json` and reused after restart.
+The default uses CPU mode (`device: cpu`, `compute_type: int8`) because it works on the widest range of Windows 10 and Windows 11 PCs. You can switch to GPU mode from the tray menu if your machine supports CUDA; the choice is saved to `config.json` and reused after restart. GPU mode is primarily for NVIDIA CUDA setups and may not work automatically on AMD, Intel, or unsupported laptop GPUs.
 
 Cleanup modes:
 
