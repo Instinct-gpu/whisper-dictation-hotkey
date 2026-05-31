@@ -345,7 +345,7 @@ def cleanup_with_ollama(text: str, mode: str, model: str, base_url: str) -> str:
     if not ollama_is_available(base_url):
         raise OllamaUnavailableError("Ollama API is not reachable")
     ensure_ollama_model(model, base_url)
-    response = ollama_generate(cleanup_prompt(text, mode), model, base_url)
+    response = ollama_generate(cleanup_prompt(text, mode), model, base_url, mode)
     cleaned = normalize_spacing(response)
     return cleaned or text
 
@@ -367,7 +367,8 @@ def ensure_ollama_model(model: str, base_url: str) -> None:
     ollama_request(base_url, "/api/pull", {"name": model, "stream": False}, timeout=1800)
 
 
-def ollama_generate(prompt: str, model: str, base_url: str) -> str:
+def ollama_generate(prompt: str, model: str, base_url: str, mode: str) -> str:
+    predict_limit = 700 if mode == "enhanced" else 500 if mode == "bullets" else 350
     data = ollama_request(
         base_url,
         "/api/generate",
@@ -375,9 +376,10 @@ def ollama_generate(prompt: str, model: str, base_url: str) -> str:
             "model": model,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": "30m",
             "options": {
                 "temperature": 0.1,
-                "num_predict": 700,
+                "num_predict": predict_limit,
             },
         },
         timeout=300,
@@ -403,6 +405,11 @@ def cleanup_prompt(text: str, mode: str) -> str:
             "Rewrite the transcript into polished, clear text. Preserve the meaning, keep technical terms, "
             "use light formatting when helpful, and remove filler words or false starts. Do not add facts."
         )
+    elif mode == "bullets":
+        instruction = (
+            "Convert the transcript into a concise bullet list. Preserve the speaker's meaning and all important "
+            "details, group related points, and remove filler words or false starts. Do not add facts."
+        )
     else:
         instruction = (
             "Clean up the transcript. Fix punctuation and casing, remove filler words and repeated false starts, "
@@ -410,7 +417,8 @@ def cleanup_prompt(text: str, mode: str) -> str:
         )
     return (
         f"{instruction}\n\n"
-        "Return only the final text. No commentary, labels, or quotes.\n\n"
+        "Return only the final text. No commentary, labels, or quotes. "
+        "For bullet mode, each bullet must start with '- '.\n\n"
         "Transcript:\n"
         f"{text.strip()}"
     )

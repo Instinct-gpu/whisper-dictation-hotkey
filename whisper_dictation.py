@@ -250,6 +250,7 @@ class DictationApp:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Raw", self._use_raw_cleanup, checked=lambda item: self.config.cleanup_mode == "raw"),
                 pystray.MenuItem("Clean", self._use_clean_cleanup, checked=lambda item: self.config.cleanup_mode == "clean"),
+                pystray.MenuItem("Bullets", self._use_bullets_cleanup, checked=lambda item: self.config.cleanup_mode == "bullets"),
                 pystray.MenuItem("Enhanced", self._use_enhanced_cleanup, checked=lambda item: self.config.cleanup_mode == "enhanced"),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Use GPU", self._use_gpu, checked=lambda item: self.config.device == "cuda"),
@@ -294,7 +295,7 @@ class DictationApp:
         os.startfile(TRANSCRIPT_LOG_DIR)
 
     def _open_history(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
-        threading.Thread(target=open_history_window, daemon=True).start()
+        open_latest_history()
 
     def _mode_label(self) -> str:
         return "GPU" if self.config.device == "cuda" else "CPU"
@@ -304,6 +305,9 @@ class DictationApp:
 
     def _use_clean_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self._set_cleanup_mode("clean")
+
+    def _use_bullets_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self._set_cleanup_mode("bullets")
 
     def _use_enhanced_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self._set_cleanup_mode("enhanced")
@@ -723,7 +727,7 @@ def cleanup_with_ollama(
         raise OllamaUnavailableError("Ollama API is not reachable")
     ensure_ollama_model(model, base_url, on_model_missing=on_model_missing)
     prompt = cleanup_prompt(text, mode)
-    response = ollama_generate(prompt, model, base_url)
+    response = ollama_generate(prompt, model, base_url, mode)
     cleaned = normalize_spacing(response)
     return cleaned or text
 
@@ -752,7 +756,8 @@ def ensure_ollama_model(
     log_event(f"ollama model ready {model}")
 
 
-def ollama_generate(prompt: str, model: str, base_url: str) -> str:
+def ollama_generate(prompt: str, model: str, base_url: str, mode: str) -> str:
+    predict_limit = 700 if mode == "enhanced" else 500 if mode == "bullets" else 350
     data = ollama_request(
         base_url,
         "/api/generate",
@@ -760,9 +765,10 @@ def ollama_generate(prompt: str, model: str, base_url: str) -> str:
             "model": model,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": "30m",
             "options": {
                 "temperature": 0.1,
-                "num_predict": 700,
+                "num_predict": predict_limit,
             },
         },
         timeout=300,
@@ -788,6 +794,11 @@ def cleanup_prompt(text: str, mode: str) -> str:
             "Rewrite the transcript into polished, clear text. Preserve the meaning, keep technical terms, "
             "use light formatting when helpful, and remove filler words or false starts. Do not add facts."
         )
+    elif mode == "bullets":
+        instruction = (
+            "Convert the transcript into a concise bullet list. Preserve the speaker's meaning and all important "
+            "details, group related points, and remove filler words or false starts. Do not add facts."
+        )
     else:
         instruction = (
             "Clean up the transcript. Fix punctuation and casing, remove filler words and repeated false starts, "
@@ -795,7 +806,8 @@ def cleanup_prompt(text: str, mode: str) -> str:
         )
     return (
         f"{instruction}\n\n"
-        "Return only the final text. No commentary, labels, or quotes.\n\n"
+        "Return only the final text. No commentary, labels, or quotes. "
+        "For bullet mode, each bullet must start with '- '.\n\n"
         "Transcript:\n"
         f"{text.strip()}"
     )
@@ -860,6 +872,19 @@ def append_transcript_history(raw_text: str, output_text: Optional[str] = None, 
             log.write(f"[{timestamp}] {mode.upper()}\nRAW: {raw}\nOUTPUT: {output}\n\n")
         else:
             log.write(f"[{timestamp}] {raw}\n\n")
+
+
+def open_latest_history() -> None:
+    TRANSCRIPT_LOG_DIR.mkdir(exist_ok=True)
+    latest = sorted(TRANSCRIPT_LOG_DIR.glob("*.txt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not latest:
+        notify_user("Whisper Dictation", "No dictation history yet.")
+        return
+    try:
+        os.startfile(latest[0])
+    except OSError as exc:
+        log_event(f"failed to open history file: {exc}")
+        notify_user("Whisper Dictation", f"Could not open history file:\n{latest[0]}")
 
 
 def open_history_window() -> None:

@@ -74,6 +74,7 @@ Cleanup modes:
 
 - `raw`: paste Whisper's transcript directly.
 - `clean`: fix punctuation/casing and remove filler words while preserving meaning.
+- `bullets`: turn the transcript into a concise bullet list.
 - `enhanced`: more opinionated rewrite for clearer polished text.
 
 Cleanup requires Ollama when `cleanup_engine` is `ollama`. Install Ollama from [ollama.com/download](https://ollama.com/download). If Ollama is running but the configured model is missing, the app pulls `qwen2.5:1.5b` automatically the first time cleanup is used. If Ollama is not running, the script falls back to raw dictation.
