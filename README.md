@@ -148,6 +148,7 @@ Edit `config.json`:
   "visual_indicator": true,
   "cleanup_mode": "clean",
   "cleanup_engine": "openai",
+  "cleanup_device": "cpu",
   "ollama_model": "qwen2.5:1.5b",
   "ollama_base_url": "http://localhost:11434",
   "openai_model": "gpt-4.1-nano",
@@ -175,7 +176,7 @@ Cleanup also tells the model not to use em dashes or en dashes, so cleaned text 
 
 Cleanup engines:
 
-- `ollama`: local cleanup through Ollama. If Ollama is not running, the app prompts once and falls back to raw dictation. If the configured model is missing, the app pulls it automatically.
+- `ollama`: local cleanup through Ollama. In Settings this appears as `Ollama CPU` or `Ollama GPU`; CPU sends `num_gpu: 0` to Ollama so cleanup does not use the GPU. If Ollama is not running, the app prompts once and falls back to raw dictation. If the configured model is missing, the app pulls it automatically.
 - `openai`: cloud cleanup through the OpenAI API using `openai_model`.
 
 For OpenAI cleanup, paste your API key in Settings or copy `.env.example` to `.env` and add:
@@ -186,7 +187,7 @@ OPENAI_API_KEY=your_key_here
 
 The tray menu is intentionally minimal: it shows current status plus `Settings` and `Open History`. The native Windows tray menu is controlled by Windows, so the app cannot fully theme that menu, but the app window itself uses a compact dark UI.
 
-The `Settings` window includes tabs for settings and history. Settings can switch cleanup mode, cleanup engine, CPU/GPU mode, hotkey, models, and save an OpenAI API key. History opens inside the same window with chat-style entries and a copy button for each item.
+The `Settings` window includes tabs for settings and history. Settings can switch cleanup mode, cleanup engine, transcription CPU/GPU mode, hotkey, models, and save an OpenAI API key. History opens inside the same window with chat-style entries and a copy button for each item.
 
 Approximate OpenAI cleanup cost with `gpt-4.1-nano`: OpenAI currently lists `gpt-4.1-nano` at $0.10 per 1M input tokens and $0.40 per 1M output tokens. A normal short dictation cleanup is often around 150-500 input tokens and 100-300 output tokens, roughly $0.00006-$0.00017 per call. Longer enhanced rewrites cost more, but still usually fractions of a cent.
 

@@ -40,6 +40,7 @@ class AppConfig:
     sample_rate: int = 16000
     cleanup_mode: str = "clean"
     cleanup_engine: str = "ollama"
+    cleanup_device: str = "cpu"
     ollama_model: str = "qwen2.5:1.5b"
     ollama_base_url: str = "http://localhost:11434"
     openai_model: str = "gpt-4.1-nano"
@@ -323,7 +324,17 @@ def write_temp_wav(audio: np.ndarray, sample_rate: int) -> Path:
 
 
 def normalize_spacing(text: str) -> str:
+    text = normalize_dashes(text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def normalize_dashes(text: str) -> str:
+    text = re.sub(r"(?<=\d)[\u2013\u2014\u2212](?=\d)", "-", text)
+    text = re.sub(r"\s*[\u2013\u2014\u2212]\s*", ", ", text)
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r",\s*([.!?;:])", r"\1", text)
+    text = re.sub(r",\s*,+", ",", text)
+    return text
 
 
 class OllamaUnavailableError(RuntimeError):
@@ -349,7 +360,13 @@ def cleanup_text(text: str, config: AppConfig) -> str:
     if config.cleanup_engine != "ollama":
         return text
     try:
-        return cleanup_with_ollama(text, config.cleanup_mode, config.ollama_model, config.ollama_base_url)
+        return cleanup_with_ollama(
+            text,
+            config.cleanup_mode,
+            config.ollama_model,
+            config.ollama_base_url,
+            config.cleanup_device,
+        )
     except OllamaUnavailableError as exc:
         print(f"Ollama unavailable, using raw transcript: {exc}")
         return text
@@ -358,11 +375,11 @@ def cleanup_text(text: str, config: AppConfig) -> str:
         return text
 
 
-def cleanup_with_ollama(text: str, mode: str, model: str, base_url: str) -> str:
+def cleanup_with_ollama(text: str, mode: str, model: str, base_url: str, cleanup_device: str = "cpu") -> str:
     if not ollama_is_available(base_url):
         raise OllamaUnavailableError("Ollama API is not reachable")
     ensure_ollama_model(model, base_url)
-    response = ollama_generate(cleanup_prompt(text, mode), model, base_url, mode)
+    response = ollama_generate(cleanup_prompt(text, mode), model, base_url, mode, cleanup_device)
     cleaned = normalize_spacing(response)
     return cleaned or text
 
@@ -427,8 +444,16 @@ def ensure_ollama_model(model: str, base_url: str) -> None:
     ollama_request(base_url, "/api/pull", {"name": model, "stream": False}, timeout=1800)
 
 
-def ollama_generate(prompt: str, model: str, base_url: str, mode: str) -> str:
+def ollama_generate(prompt: str, model: str, base_url: str, mode: str, cleanup_device: str = "cpu") -> str:
     predict_limit = 700 if mode == "enhanced" else 350
+    options = {
+        "temperature": 0.1,
+        "num_predict": predict_limit,
+    }
+    if cleanup_device == "cpu":
+        options["num_gpu"] = 0
+    elif cleanup_device == "gpu":
+        options["num_gpu"] = 999
     data = ollama_request(
         base_url,
         "/api/generate",
@@ -437,10 +462,7 @@ def ollama_generate(prompt: str, model: str, base_url: str, mode: str) -> str:
             "prompt": prompt,
             "stream": False,
             "keep_alive": "30m",
-            "options": {
-                "temperature": 0.1,
-                "num_predict": predict_limit,
-            },
+            "options": options,
         },
         timeout=300,
     )
@@ -492,7 +514,7 @@ def cleanup_instruction(mode: str) -> str:
         "Bad: Transcript says 'what is the capital of France' and output says 'The capital of France is Paris.'\n"
         "Good: Transcript says 'what is the capital of France' and output says 'What is the capital of France?'\n\n"
         "Return only the speaker's final cleaned text. No commentary, labels, or quotes. If you use bullets, start each bullet with '- '. "
-        "Do not use em dashes or en dashes. Use commas, periods, colons, parentheses, or a plain hyphen instead."
+        "Do not use em dashes or en dashes. For pauses or asides, use commas, periods, colons, or parentheses instead."
     )
 
 

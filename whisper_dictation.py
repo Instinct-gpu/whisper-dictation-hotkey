@@ -59,6 +59,7 @@ class AppConfig:
     visual_indicator: bool = True
     cleanup_mode: str = "clean"
     cleanup_engine: str = "ollama"
+    cleanup_device: str = "cpu"
     ollama_model: str = "qwen2.5:1.5b"
     ollama_base_url: str = "http://localhost:11434"
     openai_model: str = "gpt-4.1-nano"
@@ -343,7 +344,12 @@ class DictationApp:
         return "GPU" if self.config.device == "cuda" else "CPU"
 
     def _cleanup_engine_label(self) -> str:
-        return "OpenAI" if self.config.cleanup_engine == "openai" else "Ollama" if self.config.cleanup_engine == "ollama" else "Off"
+        if self.config.cleanup_engine == "openai":
+            return "OpenAI"
+        if self.config.cleanup_engine == "ollama":
+            processor = "GPU" if self.config.cleanup_device == "gpu" else "CPU"
+            return f"Ollama ({processor})"
+        return "Off"
 
     def _use_raw_cleanup(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         self._set_cleanup_mode("raw")
@@ -635,6 +641,7 @@ class DictationApp:
                 mode=self.config.cleanup_mode,
                 model=self.config.ollama_model,
                 base_url=self.config.ollama_base_url,
+                cleanup_device=self.config.cleanup_device,
                 on_model_missing=lambda _model: self._set_processing_stage("Model missing, downloading now"),
             )
         except OllamaUnavailableError as exc:
@@ -890,13 +897,14 @@ def cleanup_with_ollama(
     mode: str,
     model: str,
     base_url: str,
+    cleanup_device: str = "cpu",
     on_model_missing: Optional[Callable[[str], None]] = None,
 ) -> str:
     if not ollama_is_available(base_url):
         raise OllamaUnavailableError("Ollama API is not reachable")
     ensure_ollama_model(model, base_url, on_model_missing=on_model_missing)
     prompt = cleanup_prompt(text, mode)
-    response = ollama_generate(prompt, model, base_url, mode)
+    response = ollama_generate(prompt, model, base_url, mode, cleanup_device)
     cleaned = normalize_output_text(response)
     return cleaned or text
 
@@ -925,8 +933,16 @@ def ensure_ollama_model(
     log_event(f"ollama model ready {model}")
 
 
-def ollama_generate(prompt: str, model: str, base_url: str, mode: str) -> str:
+def ollama_generate(prompt: str, model: str, base_url: str, mode: str, cleanup_device: str = "cpu") -> str:
     predict_limit = 700 if mode == "enhanced" else 350
+    options = {
+        "temperature": 0.1,
+        "num_predict": predict_limit,
+    }
+    if cleanup_device == "cpu":
+        options["num_gpu"] = 0
+    elif cleanup_device == "gpu":
+        options["num_gpu"] = 999
     data = ollama_request(
         base_url,
         "/api/generate",
@@ -935,10 +951,7 @@ def ollama_generate(prompt: str, model: str, base_url: str, mode: str) -> str:
             "prompt": prompt,
             "stream": False,
             "keep_alive": "30m",
-            "options": {
-                "temperature": 0.1,
-                "num_predict": predict_limit,
-            },
+            "options": options,
         },
         timeout=300,
     )
@@ -990,7 +1003,7 @@ def cleanup_instruction(mode: str) -> str:
         "Bad: Transcript says 'what is the capital of France' and output says 'The capital of France is Paris.'\n"
         "Good: Transcript says 'what is the capital of France' and output says 'What is the capital of France?'\n\n"
         "Return only the speaker's final cleaned text. No commentary, labels, or quotes. If you use bullets, start each bullet with '- '. "
-        "Do not use em dashes or en dashes. Use commas, periods, colons, parentheses, or a plain hyphen instead."
+        "Do not use em dashes or en dashes. For pauses or asides, use commas, periods, colons, or parentheses instead."
     )
 
 
@@ -1088,7 +1101,10 @@ def legacy_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing:
 
     cfg = app.config
     mode_var = tk.StringVar(value=cfg.cleanup_mode)
-    engine_var = tk.StringVar(value=cfg.cleanup_engine)
+    initial_engine = cfg.cleanup_engine
+    if initial_engine == "ollama":
+        initial_engine = "ollama_gpu" if cfg.cleanup_device == "gpu" else "ollama_cpu"
+    engine_var = tk.StringVar(value=initial_engine)
     compute_var = tk.StringVar(value="GPU" if cfg.device == "cuda" else "CPU")
     hotkey_var = tk.StringVar(value=cfg.hotkey)
     whisper_model_var = tk.StringVar(value=cfg.model_size)
@@ -1177,9 +1193,13 @@ def legacy_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing:
 
     def save() -> None:
         compute = compute_var.get()
+        selected_engine = engine_var.get()
+        cleanup_engine = "ollama" if selected_engine in {"ollama_cpu", "ollama_gpu"} else selected_engine
+        cleanup_device = "gpu" if selected_engine == "ollama_gpu" else "cpu"
         updates = {
             "cleanup_mode": mode_var.get(),
-            "cleanup_engine": engine_var.get(),
+            "cleanup_engine": cleanup_engine,
+            "cleanup_device": cleanup_device,
             "device": "cuda" if compute == "GPU" else "cpu",
             "compute_type": "float16" if compute == "GPU" else "int8",
             "hotkey": hotkey_var.get().strip() or cfg.hotkey,
@@ -1208,7 +1228,7 @@ def legacy_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing:
     right.pack(side="left", fill="x", expand=True, padx=(7, 0))
 
     field(left, "Cleanup", option(left, mode_var, ("raw", "clean", "enhanced")))
-    field(right, "Engine", option(right, engine_var, ("openai", "ollama", "off")))
+    field(right, "Engine", option(right, engine_var, ("openai", "ollama_cpu", "ollama_gpu", "off")))
     field(left, "Transcription", option(left, compute_var, ("CPU", "GPU")))
     field(right, "Hotkey", entry(right, hotkey_var))
 
@@ -1689,7 +1709,10 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
         tab_buttons[tab_name] = control
 
     mode_var = tk.StringVar(value=app.config.cleanup_mode)
-    engine_var = tk.StringVar(value=app.config.cleanup_engine)
+    initial_engine = app.config.cleanup_engine
+    if initial_engine == "ollama":
+        initial_engine = "ollama_gpu" if app.config.cleanup_device == "gpu" else "ollama_cpu"
+    engine_var = tk.StringVar(value=initial_engine)
     compute_var = tk.StringVar(value="gpu" if app.config.device == "cuda" else "cpu")
     hotkey_var = tk.StringVar(value=app.config.hotkey)
     whisper_model_var = tk.StringVar(value=app.config.model_size)
@@ -1713,10 +1736,14 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
     def save_settings() -> None:
         save_api_key()
         compute = compute_var.get()
+        selected_engine = engine_var.get()
+        cleanup_engine = "ollama" if selected_engine in {"ollama_cpu", "ollama_gpu"} else selected_engine
+        cleanup_device = "gpu" if selected_engine == "ollama_gpu" else "cpu"
         app.apply_settings(
             {
                 "cleanup_mode": mode_var.get(),
-                "cleanup_engine": engine_var.get(),
+                "cleanup_engine": cleanup_engine,
+                "cleanup_device": cleanup_device,
                 "device": "cuda" if compute == "gpu" else "cpu",
                 "compute_type": "float16" if compute == "gpu" else "int8",
                 "hotkey": hotkey_var.get().strip() or app.config.hotkey,
@@ -1838,9 +1865,10 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
             "clean": "Fix punctuation, capitalization, spacing, and obvious dictation wording while preserving your meaning.",
             "enhanced": "Do a stronger cleanup pass and add light structure, including bullets when they naturally help.",
         }))
-        field(settings_body, "Cleanup engine", lambda parent_frame: segmented(parent_frame, engine_var, (("OpenAI", "openai"), ("Ollama", "ollama"), ("Off", "off")), {
+        field(settings_body, "Cleanup engine", lambda parent_frame: segmented(parent_frame, engine_var, (("OpenAI", "openai"), ("Ollama CPU", "ollama_cpu"), ("Ollama GPU", "ollama_gpu"), ("Off", "off")), {
             "openai": "Uses the OpenAI API for cleanup. This is usually faster and produces better formatting when an API key is set.",
-            "ollama": "Uses a local Ollama model for cleanup. It keeps cleanup local but may be slower on CPU.",
+            "ollama_cpu": "Uses a local Ollama model for cleanup and forces it onto the CPU. Best when your GPU is busy.",
+            "ollama_gpu": "Uses a local Ollama model for cleanup and asks Ollama to use GPU acceleration.",
             "off": "Skips cleanup entirely and pastes the raw transcription.",
         }))
 
@@ -2168,7 +2196,17 @@ def paste_text(text: str, target_hwnd: Optional[int], restore_clipboard: bool = 
 
 
 def normalize_spacing(text: str) -> str:
+    text = normalize_dashes(text)
     text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def normalize_dashes(text: str) -> str:
+    text = re.sub(r"(?<=\d)[\u2013\u2014\u2212](?=\d)", "-", text)
+    text = re.sub(r"\s*[\u2013\u2014\u2212]\s*", ", ", text)
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r",\s*([.!?;:])", r"\1", text)
+    text = re.sub(r",\s*,+", ",", text)
     return text
 
 
