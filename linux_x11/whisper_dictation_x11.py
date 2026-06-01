@@ -480,7 +480,8 @@ def cleanup_instruction(mode: str) -> str:
         )
     return (
         f"{instruction}\n\n"
-        "Return only the final text. No commentary, labels, or quotes. If you use bullets, start each bullet with '- '."
+        "Return only the final text. No commentary, labels, or quotes. If you use bullets, start each bullet with '- '. "
+        "Do not use em dashes or en dashes. Use commas, periods, colons, parentheses, or a plain hyphen instead."
     )
 
 

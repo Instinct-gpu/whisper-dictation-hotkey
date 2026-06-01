@@ -80,6 +80,8 @@ Cleanup modes:
 
 Clean and Enhanced can use bullet points when the transcript clearly contains tasks, options, steps, requirements, or multiple distinct ideas. They keep normal prose when bullets do not fit.
 
+Cleanup also tells the model not to use em dashes or en dashes, so cleaned text should stick to normal punctuation or a plain hyphen.
+
 Cleanup engines:
 
 - `ollama`: local cleanup through Ollama. Install Ollama from [ollama.com/download](https://ollama.com/download). If Ollama is running but the configured model is missing, the app pulls `qwen2.5:1.5b` automatically the first time cleanup is used.
