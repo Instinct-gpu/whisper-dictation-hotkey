@@ -1,0 +1,75 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Relay for Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.11.1
+
+      - name: Validate Python files
+        shell: pwsh
+        run: |
+          python -m py_compile .\whisper_dictation.py .\linux_x11\whisper_dictation_x11.py
+
+      - name: Build packaged app
+        shell: pwsh
+        run: |
+          $Icon = (Resolve-Path .\assets\whisper-dictation.ico).Path
+          pyinstaller --noconfirm --clean --onedir --windowed `
+            --name WhisperDictation `
+            --icon "$Icon" `
+            --distpath .\app `
+            --workpath .\build\pyinstaller-onedir `
+            --specpath .\build `
+            .\whisper_dictation.py
+
+      - name: Assemble release folder
+        shell: pwsh
+        run: |
+          $Package = ".\release\Relay-Windows"
+          New-Item -ItemType Directory -Force -Path $Package | Out-Null
+          Copy-Item -LiteralPath ".\app" -Destination $Package -Recurse
+          Copy-Item -LiteralPath ".\assets" -Destination $Package -Recurse
+          Copy-Item -LiteralPath ".\config.json" -Destination $Package
+          Copy-Item -LiteralPath ".\.env.example" -Destination $Package
+          Copy-Item -LiteralPath ".\install_windows.ps1" -Destination $Package
+          Copy-Item -LiteralPath ".\uninstall_windows.ps1" -Destination $Package
+          Copy-Item -LiteralPath ".\README.md" -Destination $Package
+          Copy-Item -LiteralPath ".\LICENSE" -Destination $Package
+          Compress-Archive -Path "$Package\*" -DestinationPath ".\release\Relay-Windows.zip" -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Relay-Windows
+          path: release/Relay-Windows.zip
+
+      - name: Attach ZIP to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/Relay-Windows.zip

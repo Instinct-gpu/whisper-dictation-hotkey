@@ -1,4 +1,4 @@
-# Building Whisper Dictation Hotkey
+# Building Relay
 
 These notes are for building the Windows packaged app from source.
 
@@ -50,8 +50,28 @@ The executable will be:
 app\WhisperDictation\WhisperDictation.exe
 ```
 
+## Build The Release ZIP
+
+GitHub Actions builds `Relay-Windows.zip` automatically on pushes to `main` and on tags that start with `v`.
+
+To create the same package locally after building the app folder:
+
+```powershell
+$Package = ".\release\Relay-Windows"
+New-Item -ItemType Directory -Force -Path $Package | Out-Null
+Copy-Item -LiteralPath ".\app" -Destination $Package -Recurse
+Copy-Item -LiteralPath ".\assets" -Destination $Package -Recurse
+Copy-Item -LiteralPath ".\config.json" -Destination $Package
+Copy-Item -LiteralPath ".\.env.example" -Destination $Package
+Copy-Item -LiteralPath ".\install_windows.ps1" -Destination $Package
+Copy-Item -LiteralPath ".\uninstall_windows.ps1" -Destination $Package
+Copy-Item -LiteralPath ".\README.md" -Destination $Package
+Copy-Item -LiteralPath ".\LICENSE" -Destination $Package
+Compress-Archive -Path "$Package\*" -DestinationPath ".\release\Relay-Windows.zip" -Force
+```
+
 ## Notes
 
-- The default configuration tries GPU mode (`device: cuda`, `compute_type: float16`) and can be switched to CPU mode from the tray menu. If GPU model loading fails, the app falls back to CPU/int8.
+- The default configuration uses CPU mode (`device: cpu`, `compute_type: int8`) for broad compatibility. GPU mode can be selected in Settings when CUDA is available.
 - `vad_filter` is disabled in the current build because PyInstaller packaging did not include faster-whisper's optional Silero VAD assets by default.
 - The generated `app`, `build`, `.venv`, `log`, and runtime files are intentionally ignored by git.
