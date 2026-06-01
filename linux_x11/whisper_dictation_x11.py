@@ -33,6 +33,7 @@ LOG_DIR = APP_DIR / "log"
 @dataclass
 class AppConfig:
     hotkey: str = "ctrl+shift+space"
+    raw_hotkey: str = "ctrl+shift+x"
     model_size: str = "base.en"
     device: str = "cpu"
     compute_type: str = "int8"
@@ -155,13 +156,15 @@ class X11DictationApp:
         self.transcription_lock = threading.Lock()
         self.pressed: set[str] = set()
         self.is_recording = False
+        self.recording_output_mode = "cleaned"
+        self.active_hotkey = ""
         self.lock = threading.Lock()
         self.last_level_update = 0.0
 
     def run(self) -> None:
         listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
         listener.start()
-        print(f"Whisper Dictation X11 running. Hold {self.config.hotkey} to record.")
+        print(f"Relay X11 running. Hold {self.config.hotkey} for cleaned dictation or {self.config.raw_hotkey} for raw dictation.")
         try:
             while True:
                 time.sleep(1)
@@ -172,23 +175,27 @@ class X11DictationApp:
         name = key_name(key)
         if name:
             self.pressed.add(name)
-        if hotkey_pressed(self.config.hotkey, self.pressed):
-            self.start_recording()
+        cleaned_down = hotkey_pressed(self.config.hotkey, self.pressed)
+        raw_down = hotkey_pressed(self.config.raw_hotkey, self.pressed)
+        if cleaned_down or raw_down:
+            self.start_recording("raw" if raw_down else "cleaned", self.config.raw_hotkey if raw_down else self.config.hotkey)
 
     def _on_release(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
         name = key_name(key)
         if name:
             self.pressed.discard(name)
-        if self.is_recording and not hotkey_pressed(self.config.hotkey, self.pressed):
+        if self.is_recording and self.active_hotkey and not hotkey_pressed(self.active_hotkey, self.pressed):
             self.stop_recording()
 
-    def start_recording(self) -> None:
+    def start_recording(self, output_mode: str = "cleaned", active_hotkey: str = "") -> None:
         with self.lock:
             if self.is_recording:
                 return
             self.frames = []
             self.audio_queue = queue.Queue()
             self.is_recording = True
+            self.recording_output_mode = "raw" if output_mode == "raw" else "cleaned"
+            self.active_hotkey = active_hotkey
             self.overlay.show()
             self.stream = sd.InputStream(
                 samplerate=self.config.sample_rate,
@@ -213,9 +220,11 @@ class X11DictationApp:
                 except queue.Empty:
                     break
             frames = self.frames
+            output_mode = self.recording_output_mode
             self.frames = []
+            self.active_hotkey = ""
             self.is_recording = False
-            threading.Thread(target=self._transcribe_and_paste, args=(frames,), daemon=True).start()
+            threading.Thread(target=self._transcribe_and_paste, args=(frames, output_mode), daemon=True).start()
 
     def _audio_callback(self, indata: np.ndarray, _frames: int, _time_info, status) -> None:
         if status:
@@ -227,7 +236,7 @@ class X11DictationApp:
             self.overlay.set_level(min(1.0, (rms / 0.065) ** 0.92))
             self.last_level_update = now
 
-    def _transcribe_and_paste(self, frames: list[np.ndarray]) -> None:
+    def _transcribe_and_paste(self, frames: list[np.ndarray], output_mode: str = "cleaned") -> None:
         if not frames:
             return
         audio = np.concatenate(frames, axis=0).reshape(-1)
@@ -249,8 +258,13 @@ class X11DictationApp:
             wav_path.unlink(missing_ok=True)
         if not text:
             return
-        output_text = cleanup_text(text, self.config)
-        append_history(text, output_text, self.config.cleanup_mode)
+        if output_mode == "raw":
+            output_text = normalize_spacing(text)
+            history_mode = "raw"
+        else:
+            output_text = cleanup_text(text, self.config)
+            history_mode = self.config.cleanup_mode
+        append_history(text, output_text, history_mode)
         paste_text(output_text)
         print(output_text)
 

@@ -47,6 +47,7 @@ EYE_CLOSED_ICON_PATH = APP_DIR / "assets" / "icons" / "eye-closed.png"
 @dataclass
 class AppConfig:
     hotkey: str = "<ctrl>+<shift>+space"
+    raw_hotkey: str = "<ctrl>+<shift>+x"
     cancel_key: str = "esc"
     model_size: str = "base.en"
     device: str = "cpu"
@@ -252,6 +253,8 @@ class DictationApp:
         self.last_level_update = 0.0
         self.cancel_requested = False
         self.release_poll_active = False
+        self.active_hotkey = ""
+        self.recording_output_mode = "cleaned"
         self.ollama_notice_shown = False
         self.openai_notice_shown = False
         self.processing_stage = ""
@@ -280,18 +283,18 @@ class DictationApp:
         hotkey = keyboard.Listener(on_press=self._on_key_press, on_release=self._on_key_release)
         hotkey.start()
 
-        print(f"Relay is running. Hold hotkey: {self.config.hotkey}")
-        log_event(f"app started hotkey={self.config.hotkey} device={self.config.device}/{self.config.compute_type} cleanup={self.config.cleanup_engine}/{self.config.cleanup_mode}")
+        print(f"Relay is running. Hold cleaned hotkey: {self.config.hotkey}; raw hotkey: {self.config.raw_hotkey}")
+        log_event(f"app started hotkey={self.config.hotkey} raw_hotkey={self.config.raw_hotkey} device={self.config.device}/{self.config.compute_type} cleanup={self.config.cleanup_engine}/{self.config.cleanup_mode}")
         self.icon.run()
         if self.indicator is not None:
             self.indicator.stop()
         hotkey.stop()
 
-    def start_recording(self) -> None:
+    def start_recording(self, output_mode: str = "cleaned", active_hotkey: str = "") -> None:
         with self.lock:
             if self.is_recording:
                 return
-            self._start_recording_locked()
+            self._start_recording_locked(output_mode, active_hotkey)
 
     def stop_recording(self) -> None:
         with self.lock:
@@ -416,8 +419,11 @@ class DictationApp:
 
     def _on_key_press(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
         try:
-            if hotkey_is_down(self.config.hotkey):
-                self.start_recording()
+            cleaned_down = hotkey_is_down(self.config.hotkey)
+            raw_down = hotkey_is_down(self.config.raw_hotkey)
+            if cleaned_down or raw_down:
+                active_hotkey = self.config.raw_hotkey if raw_down else self.config.hotkey
+                self.start_recording("raw" if raw_down else "cleaned", active_hotkey)
                 if sys.platform == "win32" and not self.release_poll_active:
                     self.release_poll_active = True
                     threading.Thread(target=self._poll_hotkey_release, daemon=True).start()
@@ -428,14 +434,14 @@ class DictationApp:
 
     def _on_key_release(self, key: keyboard.Key | keyboard.KeyCode | None) -> None:
         try:
-            if sys.platform != "win32" and not hotkey_is_down(self.config.hotkey):
+            if sys.platform != "win32" and self.active_hotkey and not hotkey_is_down(self.active_hotkey):
                 self.stop_recording()
         except Exception as exc:
             log_event(f"hotkey release failed: {exc}")
 
     def _poll_hotkey_release(self) -> None:
         try:
-            while hotkey_is_down(self.config.hotkey):
+            while self.active_hotkey and hotkey_is_down(self.active_hotkey):
                 time.sleep(0.035)
             self.stop_recording()
         except Exception as exc:
@@ -443,16 +449,18 @@ class DictationApp:
         finally:
             self.release_poll_active = False
 
-    def _start_recording_locked(self) -> None:
+    def _start_recording_locked(self, output_mode: str, active_hotkey: str) -> None:
         self.frames = []
         self.cancel_requested = False
+        self.recording_output_mode = "raw" if output_mode == "raw" else "cleaned"
+        self.active_hotkey = active_hotkey
         self.audio_queue = queue.Queue()
         self.target_hwnd = get_foreground_window()
         self.is_recording = True
         self._refresh_status_locked()
         self._update_icon("recording")
         if self.indicator is not None:
-            self.indicator.show()
+            self.indicator.show("Recording Raw" if self.recording_output_mode == "raw" else "Recording")
 
         try:
             self.stream = sd.InputStream(
@@ -468,6 +476,7 @@ class DictationApp:
             self.frames = []
             self.audio_queue = queue.Queue()
             self.target_hwnd = None
+            self.active_hotkey = ""
             self._refresh_status_locked()
             self._update_icon("busy" if self.active_jobs else "idle")
             if self.indicator is not None:
@@ -475,7 +484,7 @@ class DictationApp:
             log_event(f"recording start failed: {exc}")
             return
         print("Recording...")
-        log_event(f"recording started hwnd={self.target_hwnd}")
+        log_event(f"recording started mode={self.recording_output_mode} hwnd={self.target_hwnd}")
 
     def _stop_recording_locked(self) -> None:
         if self.stream is not None:
@@ -495,6 +504,7 @@ class DictationApp:
 
         self.is_recording = False
         if self.cancel_requested:
+            self.active_hotkey = ""
             if self.indicator is not None:
                 self.indicator.hide()
             self._refresh_status_locked()
@@ -504,8 +514,10 @@ class DictationApp:
 
         frames = self.frames
         target_hwnd = self.target_hwnd
+        output_mode = self.recording_output_mode
         self.frames = []
         self.target_hwnd = None
+        self.active_hotkey = ""
         self.active_jobs += 1
         self.processing_stage = "Transcribing"
         self._refresh_status_locked()
@@ -513,7 +525,7 @@ class DictationApp:
         if self.indicator is not None and not self.is_recording:
             self.indicator.show("Transcribing")
         log_event(f"recording stopped frames={len(frames)} hwnd={target_hwnd}")
-        worker = threading.Thread(target=self._transcribe_and_paste, args=(frames, target_hwnd), daemon=True)
+        worker = threading.Thread(target=self._transcribe_and_paste, args=(frames, target_hwnd, output_mode), daemon=True)
         self.worker_threads.append(worker)
         worker.start()
 
@@ -528,7 +540,7 @@ class DictationApp:
                 self.indicator.set_level(min(1.0, (rms / 0.065) ** 0.92))
                 self.last_level_update = now
 
-    def _transcribe_and_paste(self, frames: list[np.ndarray], target_hwnd: Optional[int]) -> None:
+    def _transcribe_and_paste(self, frames: list[np.ndarray], target_hwnd: Optional[int], output_mode: str = "cleaned") -> None:
         try:
             if not frames:
                 print("No audio captured.")
@@ -563,9 +575,14 @@ class DictationApp:
                 log_event("no speech detected")
                 return
 
-            self._set_processing_stage("Cleaning")
-            output_text = self._cleanup_text(text)
-            append_transcript_history(text, output_text, self.config.cleanup_mode)
+            if output_mode == "raw":
+                output_text = normalize_output_text(text)
+                history_mode = "raw"
+            else:
+                self._set_processing_stage("Cleaning")
+                output_text = self._cleanup_text(text)
+                history_mode = self.config.cleanup_mode
+            append_transcript_history(text, output_text, history_mode)
             self._set_processing_stage("Pasting")
             paste_text(output_text, target_hwnd=target_hwnd, restore_clipboard=self.config.restore_clipboard)
             print(f"Pasted: {output_text}")
@@ -1107,6 +1124,7 @@ def legacy_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing:
     engine_var = tk.StringVar(value=initial_engine)
     compute_var = tk.StringVar(value="GPU" if cfg.device == "cuda" else "CPU")
     hotkey_var = tk.StringVar(value=cfg.hotkey)
+    raw_hotkey_var = tk.StringVar(value=cfg.raw_hotkey)
     whisper_model_var = tk.StringVar(value=cfg.model_size)
     openai_model_var = tk.StringVar(value=cfg.openai_model)
     ollama_model_var = tk.StringVar(value=cfg.ollama_model)
@@ -1203,6 +1221,7 @@ def legacy_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing:
             "device": "cuda" if compute == "GPU" else "cpu",
             "compute_type": "float16" if compute == "GPU" else "int8",
             "hotkey": hotkey_var.get().strip() or cfg.hotkey,
+            "raw_hotkey": raw_hotkey_var.get().strip() or cfg.raw_hotkey,
             "model_size": whisper_model_var.get().strip() or cfg.model_size,
             "openai_model": openai_model_var.get().strip() or cfg.openai_model,
             "ollama_model": ollama_model_var.get().strip() or cfg.ollama_model,
@@ -1230,7 +1249,8 @@ def legacy_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing:
     field(left, "Cleanup", option(left, mode_var, ("raw", "clean", "enhanced")))
     field(right, "Engine", option(right, engine_var, ("openai", "ollama_cpu", "ollama_gpu", "off")))
     field(left, "Transcription", option(left, compute_var, ("CPU", "GPU")))
-    field(right, "Hotkey", entry(right, hotkey_var))
+    field(right, "Cleaned hotkey", entry(right, hotkey_var))
+    field(left, "Raw hotkey", entry(left, raw_hotkey_var))
 
     label(body, "Models", "fg", 10, True).pack(anchor="w", pady=(4, 8))
     field(body, "OpenAI cleanup model", entry(body, openai_model_var))
@@ -1715,6 +1735,7 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
     engine_var = tk.StringVar(value=initial_engine)
     compute_var = tk.StringVar(value="gpu" if app.config.device == "cuda" else "cpu")
     hotkey_var = tk.StringVar(value=app.config.hotkey)
+    raw_hotkey_var = tk.StringVar(value=app.config.raw_hotkey)
     whisper_model_var = tk.StringVar(value=app.config.model_size)
     openai_model_var = tk.StringVar(value=app.config.openai_model)
     ollama_model_var = tk.StringVar(value=app.config.ollama_model)
@@ -1747,6 +1768,7 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
                 "device": "cuda" if compute == "gpu" else "cpu",
                 "compute_type": "float16" if compute == "gpu" else "int8",
                 "hotkey": hotkey_var.get().strip() or app.config.hotkey,
+                "raw_hotkey": raw_hotkey_var.get().strip() or app.config.raw_hotkey,
                 "model_size": whisper_model_var.get().strip() or app.config.model_size,
                 "openai_model": openai_model_var.get().strip() or app.config.openai_model,
                 "ollama_model": ollama_model_var.get().strip() or app.config.ollama_model,
@@ -1755,8 +1777,8 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
         status_var.set("Saved")
         show_tab("settings")
 
-    def hotkey_display() -> str:
-        return hotkey_var.get().replace("<", "").replace(">", "").replace("+", " + ").upper()
+    def hotkey_display(variable: tk.StringVar) -> str:
+        return variable.get().replace("<", "").replace(">", "").replace("+", " + ").upper()
 
     def event_to_hotkey_name(event: tk.Event[Any]) -> Optional[str]:
         key = str(event.keysym).lower()
@@ -1796,7 +1818,7 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
         rounded_rect(button, 1, 1, width - 1, 33, 10, fill=fill, outline="#444444" if active else "")
         button.create_text(width // 2, 17, text=text, fill=colors["fg"], font=("Segoe UI", 9, "bold"))
 
-    def capture_hotkey(button: tk.Canvas) -> None:
+    def capture_hotkey(button: tk.Canvas, variable: tk.StringVar) -> None:
         captured: list[str] = []
         previous_info = hover_info_var.get()
         hover_info_var.set("Press the full shortcut combo. Release to save it. Esc cancels.")
@@ -1812,7 +1834,7 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
             window.unbind_all("<KeyPress>")
             window.unbind_all("<KeyRelease>")
             hover_info_var.set(previous_info or default_hover_info)
-            draw_hotkey_button(button, hotkey_display())
+            draw_hotkey_button(button, hotkey_display(variable))
 
         def on_press(event: tk.Event[Any]) -> str:
             key_name = event_to_hotkey_name(event)
@@ -1826,7 +1848,7 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
 
         def on_release(_event: tk.Event[Any]) -> str:
             if captured and any(part not in {"ctrl", "shift", "alt", "win"} for part in captured):
-                hotkey_var.set(format_hotkey(captured))
+                variable.set(format_hotkey(captured))
                 finish()
             return "break"
 
@@ -1835,13 +1857,13 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
         update_preview()
         window.focus_force()
 
-    def hotkey_button(parent_frame: tk.Widget) -> tk.Canvas:
+    def hotkey_button(parent_frame: tk.Widget, variable: tk.StringVar) -> tk.Canvas:
         button = tk.Canvas(parent_frame, width=176, height=34, bg=colors["panel"], highlightthickness=0, cursor="hand2")
-        button.bind("<Configure>", lambda _event: draw_hotkey_button(button, hotkey_display()))
-        button.bind("<Enter>", lambda _event: draw_hotkey_button(button, hotkey_display(), active=True))
-        button.bind("<Leave>", lambda _event: draw_hotkey_button(button, hotkey_display()))
-        button.bind("<Button-1>", lambda _event: capture_hotkey(button))
-        draw_hotkey_button(button, hotkey_display())
+        button.bind("<Configure>", lambda _event: draw_hotkey_button(button, hotkey_display(variable)))
+        button.bind("<Enter>", lambda _event: draw_hotkey_button(button, hotkey_display(variable), active=True))
+        button.bind("<Leave>", lambda _event: draw_hotkey_button(button, hotkey_display(variable)))
+        button.bind("<Button-1>", lambda _event: capture_hotkey(button, variable))
+        draw_hotkey_button(button, hotkey_display(variable))
         return button
 
     def render_settings() -> None:
@@ -1873,7 +1895,8 @@ def open_settings_window(parent: Optional[tk.Tk], app: DictationApp, existing: O
         }))
 
         label(settings_body, "Inputs", size=10, bold=True).pack(anchor="w", pady=(3, 8))
-        field(settings_body, "Hotkey", hotkey_button)
+        field(settings_body, "Cleaned shortcut", lambda parent_frame: hotkey_button(parent_frame, hotkey_var), "Hold this shortcut to transcribe locally, then run your selected cleanup mode and engine before pasting.")
+        field(settings_body, "Raw shortcut", lambda parent_frame: hotkey_button(parent_frame, raw_hotkey_var), "Hold this shortcut for local voice-to-text only. It skips OpenAI and Ollama cleanup for the fastest literal transcript.")
         field(settings_body, "OpenAI API key", lambda parent_frame: text_entry(parent_frame, api_key_var, show="*", reveal_toggle=True))
 
         key_row = tk.Frame(settings_body, bg=colors["panel"])

@@ -136,6 +136,7 @@ Edit `config.json`:
 ```json
 {
   "hotkey": "<ctrl>+<shift>+space",
+  "raw_hotkey": "<ctrl>+<shift>+x",
   "cancel_key": "esc",
   "model_size": "base.en",
   "device": "cpu",
@@ -172,7 +173,12 @@ Cleanup modes:
 
 Clean and Enhanced can use bullet points when the transcript clearly contains tasks, options, steps, requirements, or multiple distinct ideas. They keep normal prose when bullets do not fit.
 
-Cleanup also tells the model not to use em dashes or en dashes, so cleaned text should stick to normal punctuation or a plain hyphen.
+Cleanup also tells the model not to use em dashes or en dashes. If a model still returns one, Relay converts dash-style pauses into commas while preserving numeric ranges like `10-20`.
+
+Shortcuts:
+
+- `hotkey`: cleaned dictation. Relay transcribes locally, then applies the selected cleanup mode and cleanup engine before pasting.
+- `raw_hotkey`: raw dictation. Relay transcribes locally and pastes the transcript without OpenAI or Ollama cleanup.
 
 Cleanup engines:
 
@@ -187,7 +193,7 @@ OPENAI_API_KEY=your_key_here
 
 The tray menu is intentionally minimal: it shows current status plus `Settings` and `Open History`. The native Windows tray menu is controlled by Windows, so the app cannot fully theme that menu, but the app window itself uses a compact dark UI.
 
-The `Settings` window includes tabs for settings and history. Settings can switch cleanup mode, cleanup engine, transcription CPU/GPU mode, hotkey, models, and save an OpenAI API key. History opens inside the same window with chat-style entries and a copy button for each item.
+The `Settings` window includes tabs for settings and history. Settings can switch cleanup mode, cleanup engine, transcription CPU/GPU mode, cleaned/raw shortcuts, models, and save an OpenAI API key. History opens inside the same window with chat-style entries and a copy button for each item.
 
 Approximate OpenAI cleanup cost with `gpt-4.1-nano`: OpenAI currently lists `gpt-4.1-nano` at $0.10 per 1M input tokens and $0.40 per 1M output tokens. A normal short dictation cleanup is often around 150-500 input tokens and 100-300 output tokens, roughly $0.00006-$0.00017 per call. Longer enhanced rewrites cost more, but still usually fractions of a cent.
 
